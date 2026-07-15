@@ -2,22 +2,22 @@ from __future__ import annotations
 
 import html
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Optional
 
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QApplication,
-    QComboBox,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
-    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMessageBox,
     QPushButton,
@@ -50,24 +50,13 @@ class MainWindow(QMainWindow):
         self.auto_refresh_enabled = True
         self.refresh_in_progress = False
         self.setWindowTitle("Gitualizer")
-        self.resize(1120, 720)
+        self.resize(980, 640)
         self.setStyleSheet(APP_STYLE)
 
         self.path_edit = QLineEdit(str(initial_path or Path.cwd()))
         self.path_edit.setPlaceholderText("Path inside a Git repository")
         self.open_button = QPushButton("Browse")
         self.refresh_button = QPushButton("Refresh")
-        self.minimize_button = QPushButton("-")
-        self.fullscreen_button = QPushButton("[]")
-        self.close_button = QPushButton("X")
-        for button, tooltip in [
-            (self.minimize_button, "Minimize"),
-            (self.fullscreen_button, "Toggle full screen"),
-            (self.close_button, "Close"),
-        ]:
-            button.setObjectName("windowControl")
-            button.setToolTip(tooltip)
-            button.setFixedSize(30, 28)
 
         top = QHBoxLayout()
         top.setSpacing(8)
@@ -75,10 +64,6 @@ class MainWindow(QMainWindow):
         top.addWidget(self.path_edit, 1)
         top.addWidget(self.open_button)
         top.addWidget(self.refresh_button)
-        top.addSpacing(8)
-        top.addWidget(self.minimize_button)
-        top.addWidget(self.fullscreen_button)
-        top.addWidget(self.close_button)
 
         self.graph = CommitGraphWidget()
         graph_scroll = QScrollArea()
@@ -98,26 +83,7 @@ class MainWindow(QMainWindow):
         self.command_panel.setMinimumHeight(115)
         self.command_panel.setHtml(_empty_preview_html())
 
-        self.branch_combo = QComboBox()
-        self.branch_name = QLineEdit()
-        self.branch_name.setPlaceholderText("new-branch-name")
-        self.remote_combo = QComboBox()
-        self.commit_message = QLineEdit()
-        self.commit_message.setPlaceholderText("Commit message")
-
-        self.switch_button = QPushButton("Switch")
-        self.create_branch_button = QPushButton("Create")
-        self.stage_selected_button = QPushButton("Stage Selected")
-        self.stage_all_button = QPushButton("Stage All")
-        self.unstage_selected_button = QPushButton("Unstage Selected")
-        self.unstage_all_button = QPushButton("Unstage All")
-        self.commit_button = QPushButton("Commit")
-        self.fetch_button = QPushButton("Fetch")
-        self.ff_button = QPushButton("Fast-forward")
-        self.push_button = QPushButton("Push")
-
         self.working_panel = self._panel("Working Tree and Index", self.status_table)
-        self.operations_panel = self._operations_panel()
 
         self.repo_panel = self._panel("Repository State", self.summary)
         self.refs_panel = self._panel("References", self.refs_table)
@@ -136,14 +102,9 @@ class MainWindow(QMainWindow):
         self.main_splitter.addWidget(self.graph_scroll)
         self.main_splitter.addWidget(self.right_panel)
         self.main_splitter.setChildrenCollapsible(False)
-        self.main_splitter.setSizes([280, 600, 300])
+        self.main_splitter.setSizes([240, 520, 260])
 
         self.command_panel_group = self._panel("Operation / Preview / Commands", self.command_panel)
-        self.bottom_splitter = QSplitter(Qt.Orientation.Horizontal)
-        self.bottom_splitter.addWidget(self.operations_panel)
-        self.bottom_splitter.addWidget(self.command_panel_group)
-        self.bottom_splitter.setChildrenCollapsible(False)
-        self.bottom_splitter.setSizes([360, 720])
 
         root = QWidget()
         root_layout = QVBoxLayout(root)
@@ -151,26 +112,14 @@ class MainWindow(QMainWindow):
         root_layout.setSpacing(8)
         root_layout.addLayout(top)
         root_layout.addWidget(self.main_splitter, 1)
-        root_layout.addWidget(self.bottom_splitter)
+        root_layout.addWidget(self.command_panel_group)
         self.setCentralWidget(root)
         self._build_menus()
 
         self.open_button.clicked.connect(self._browse)
         self.refresh_button.clicked.connect(self.refresh)
         self.path_edit.returnPressed.connect(self.refresh)
-        self.minimize_button.clicked.connect(self.showMinimized)
-        self.fullscreen_button.clicked.connect(self._toggle_fullscreen)
-        self.close_button.clicked.connect(self.close)
-        self.switch_button.clicked.connect(self._switch_branch)
-        self.create_branch_button.clicked.connect(self._create_branch)
-        self.stage_selected_button.clicked.connect(self._stage_selected)
-        self.stage_all_button.clicked.connect(self._stage_all)
-        self.unstage_selected_button.clicked.connect(self._unstage_selected)
-        self.unstage_all_button.clicked.connect(self._unstage_all)
-        self.commit_button.clicked.connect(self._commit)
-        self.fetch_button.clicked.connect(self._fetch)
-        self.ff_button.clicked.connect(self._fast_forward)
-        self.push_button.clicked.connect(self._push)
+        self.graph.referenceDropped.connect(self._handle_reference_drop)
 
         self.refresh_timer = QTimer(self)
         self.refresh_timer.setInterval(2500)
@@ -192,9 +141,7 @@ class MainWindow(QMainWindow):
         file_menu.addAction("Quit", QApplication.instance().quit)
 
         edit_menu = self.menuBar().addMenu("Edit")
-        edit_menu.addAction("Stage Selected", self._stage_selected)
-        edit_menu.addAction("Unstage Selected", self._unstage_selected)
-        edit_menu.addAction("Commit Staged", self._commit)
+        edit_menu.addAction("Copy Command Preview", self.command_panel.copy)
 
         view_menu = self.menuBar().addMenu("View")
         view_menu.addAction("Workspace", self._workspace_mode)
@@ -212,11 +159,6 @@ class MainWindow(QMainWindow):
         auto_refresh.setChecked(True)
         auto_refresh.triggered.connect(self._set_auto_refresh)
         preferences_menu.addAction(auto_refresh)
-
-        operations_menu = self.menuBar().addMenu("Operations")
-        operations_menu.addAction("Fetch", self._fetch)
-        operations_menu.addAction("Fast-forward Current Branch", self._fast_forward)
-        operations_menu.addAction("Push Current Branch", self._push)
 
         help_menu = self.menuBar().addMenu("Help")
         help_menu.addAction("About Gitualizer", self._about)
@@ -237,33 +179,6 @@ class MainWindow(QMainWindow):
         group = QGroupBox(title)
         layout = QVBoxLayout(group)
         layout.addWidget(child)
-        return group
-
-    def _operations_panel(self) -> QWidget:
-        group = QGroupBox("V1 Safe Operations")
-        layout = QGridLayout(group)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setHorizontalSpacing(6)
-        layout.setVerticalSpacing(6)
-        layout.addWidget(QLabel("Branch"), 0, 0)
-        layout.addWidget(self.branch_combo, 0, 1)
-        layout.addWidget(self.switch_button, 0, 2)
-        layout.addWidget(QLabel("New branch"), 1, 0)
-        layout.addWidget(self.branch_name, 1, 1)
-        layout.addWidget(self.create_branch_button, 1, 2)
-        layout.addWidget(self.stage_selected_button, 2, 0)
-        layout.addWidget(self.stage_all_button, 2, 1)
-        layout.addWidget(self.unstage_selected_button, 2, 2)
-        layout.addWidget(self.unstage_all_button, 3, 0)
-        layout.addWidget(QLabel("Message"), 4, 0)
-        layout.addWidget(self.commit_message, 4, 1)
-        layout.addWidget(self.commit_button, 4, 2)
-        layout.addWidget(QLabel("Remote"), 5, 0)
-        layout.addWidget(self.remote_combo, 5, 1)
-        layout.addWidget(self.fetch_button, 5, 2)
-        layout.addWidget(self.ff_button, 6, 1)
-        layout.addWidget(self.push_button, 6, 2)
-        layout.setColumnStretch(1, 1)
         return group
 
     def _browse(self) -> None:
@@ -308,31 +223,10 @@ class MainWindow(QMainWindow):
         self.refresh_in_progress = False
 
     def _set_enabled(self, enabled: bool) -> None:
-        for widget in [
-            self.switch_button,
-            self.create_branch_button,
-            self.stage_selected_button,
-            self.stage_all_button,
-            self.unstage_selected_button,
-            self.unstage_all_button,
-            self.commit_button,
-            self.fetch_button,
-            self.ff_button,
-            self.push_button,
-        ]:
-            widget.setEnabled(enabled)
+        self.graph.setEnabled(enabled)
 
     def _refresh_controls(self, state: RepositoryState) -> None:
-        self.branch_combo.clear()
-        for ref in state.local_branches:
-            self.branch_combo.addItem(ref.name)
-        if state.head.branch:
-            index = self.branch_combo.findText(state.head.branch)
-            if index >= 0:
-                self.branch_combo.setCurrentIndex(index)
-        self.remote_combo.clear()
-        for remote in state.remotes:
-            self.remote_combo.addItem(remote.name)
+        return
 
     def _set_summary(self, state: RepositoryState) -> None:
         head_label = "unborn"
@@ -383,37 +277,6 @@ class MainWindow(QMainWindow):
             self.remotes_table.setItem(row, 2, QTableWidgetItem(remote.push_url or ""))
         self.remotes_table.resizeColumnsToContents()
 
-    def _selected_changes(self, area: Optional[str] = None) -> list[FileChange]:
-        changes: list[FileChange] = []
-        seen: set[str] = set()
-        for item in self.status_table.selectedItems():
-            change = item.data(Qt.ItemDataRole.UserRole)
-            if not isinstance(change, FileChange):
-                continue
-            key = f"{change.area}:{change.path}"
-            if key in seen:
-                continue
-            if area is not None and change.area != area:
-                continue
-            changes.append(change)
-            seen.add(key)
-        return changes
-
-    def _with_plan(self, builder: Callable[[RepositoryState], CommandPlan]) -> None:
-        if self.state is None:
-            return
-        try:
-            plan = builder(self.state)
-        except ValueError as exc:
-            QMessageBox.information(self, "Operation Not Available", str(exc))
-            return
-        self.graph.set_preview_plan(plan)
-        self.command_panel.setHtml(_render_plan_html(plan, details_open=False))
-        dialog = CommandPlanDialog(plan, self)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
-        self._execute_plan(plan)
-
     def _execute_plan(self, plan: CommandPlan) -> None:
         assert self.state is not None
         try:
@@ -436,67 +299,68 @@ class MainWindow(QMainWindow):
         if not result.success:
             QMessageBox.warning(self, "Git Command Failed", _render_result_text(result))
 
-    def _switch_branch(self) -> None:
-        self._with_plan(lambda state: self.planner.switch_branch(state, self.branch_combo.currentText()))
-
-    def _create_branch(self) -> None:
-        self._with_plan(lambda state: self.planner.create_branch(state, self.branch_name.text()))
-
-    def _stage_selected(self) -> None:
-        self._with_plan(lambda state: self.planner.stage_paths(state, self._selected_changes()))
-
-    def _stage_all(self) -> None:
-        self._with_plan(self.planner.stage_all)
-
-    def _unstage_selected(self) -> None:
-        self._with_plan(lambda state: self.planner.unstage_paths(state, self._selected_changes("staged")))
-
-    def _unstage_all(self) -> None:
-        self._with_plan(self.planner.unstage_all)
-
-    def _commit(self) -> None:
-        self._with_plan(lambda state: self.planner.commit(state, self.commit_message.text()))
-
-    def _fetch(self) -> None:
-        self._with_plan(lambda state: self.planner.fetch(state, self.remote_combo.currentText()))
-
-    def _fast_forward(self) -> None:
-        self._with_plan(self.planner.fast_forward_current_branch)
-
-    def _push(self) -> None:
-        self._with_plan(self.planner.push_current_branch)
+    def _handle_reference_drop(self, source: Reference, target: Reference) -> None:
+        if self.state is None:
+            return
+        plans: list[CommandPlan] = []
+        try:
+            if source.kind == "remote_tracking" and target.kind == "local_branch":
+                plans = [
+                    self.planner.integrate_remote_tracking(self.state, source, target, "ff"),
+                    self.planner.integrate_remote_tracking(self.state, source, target, "merge"),
+                    self.planner.integrate_remote_tracking(self.state, source, target, "rebase"),
+                ]
+            elif source.kind == "local_branch" and target.kind == "local_branch":
+                plans = [
+                    self.planner.integrate_local_branch(self.state, source, target, "merge_source_into_target"),
+                    self.planner.integrate_local_branch(self.state, source, target, "rebase_source_onto_target"),
+                ]
+            else:
+                QMessageBox.information(
+                    self,
+                    "No Graph Operation",
+                    "This drag does not map to a supported operation yet. Try dragging a remote-tracking branch onto a local branch.",
+                )
+                return
+        except ValueError as exc:
+            QMessageBox.information(self, "Operation Not Available", str(exc))
+            return
+        dialog = OperationChoiceDialog(source, target, plans, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted or dialog.selected_plan is None:
+            return
+        plan = dialog.selected_plan
+        self.graph.set_preview_plan(plan)
+        self.command_panel.setHtml(_render_plan_html(plan, details_open=False))
+        confirm = CommandPlanDialog(plan, self)
+        if confirm.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._execute_plan(plan)
 
     def _workspace_mode(self) -> None:
         self.working_panel.show()
         self.graph_scroll.show()
         self.right_panel.show()
-        self.bottom_splitter.show()
-        self.operations_panel.show()
         self.command_panel_group.show()
-        self.main_splitter.setSizes([280, 600, 300])
-        self.bottom_splitter.setSizes([360, 720])
+        self.main_splitter.setSizes([240, 520, 260])
 
     def _graph_focus_mode(self) -> None:
         self.working_panel.hide()
         self.graph_scroll.show()
         self.right_panel.hide()
-        self.bottom_splitter.hide()
+        self.command_panel_group.hide()
 
     def _status_focus_mode(self) -> None:
         self.working_panel.show()
         self.graph_scroll.hide()
         self.right_panel.show()
-        self.bottom_splitter.hide()
+        self.command_panel_group.hide()
         self.main_splitter.setSizes([520, 0, 520])
 
     def _command_focus_mode(self) -> None:
         self.working_panel.hide()
         self.graph_scroll.show()
         self.right_panel.hide()
-        self.bottom_splitter.show()
-        self.operations_panel.show()
         self.command_panel_group.show()
-        self.bottom_splitter.setSizes([330, 760])
 
     def _toggle_fullscreen(self) -> None:
         if self.isFullScreen():
@@ -546,9 +410,78 @@ class CommandPlanDialog(QDialog):
         layout.addWidget(buttons)
 
 
+class OperationChoiceDialog(QDialog):
+    def __init__(
+        self,
+        source: Reference,
+        target: Reference,
+        plans: list[CommandPlan],
+        parent: Optional[QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
+        self.plans = plans
+        self.selected_plan: Optional[CommandPlan] = None
+        self.setWindowTitle("Choose Graph Operation")
+        self.resize(640, 420)
+        layout = QVBoxLayout(self)
+        intro = QLabel(
+            f"You dragged `{source.name}` onto `{target.name}`. Choose the Git strategy that matches the graph change you expect."
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        self.list_widget = QListWidget()
+        for index, plan in enumerate(plans):
+            item = QListWidgetItem(plan.title)
+            item.setData(Qt.ItemDataRole.UserRole, index)
+            self.list_widget.addItem(item)
+        self.list_widget.setCurrentRow(0)
+        layout.addWidget(self.list_widget)
+
+        self.details = QTextBrowser()
+        self.details.setMinimumHeight(150)
+        layout.addWidget(self.details)
+        self.list_widget.currentRowChanged.connect(self._show_plan)
+        self._show_plan(0)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Ok)
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Preview This Change")
+        buttons.accepted.connect(self._accept_selected)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _show_plan(self, row: int) -> None:
+        if row < 0 or row >= len(self.plans):
+            return
+        plan = self.plans[row]
+        effects = "".join(f"<li>{html.escape(effect)}</li>" for effect in plan.expected_effects)
+        warnings = "".join(f"<li>{html.escape(warning)}</li>" for warning in plan.warnings)
+        warnings_html = f"<p><b>Warnings</b></p><ul>{warnings}</ul>" if warnings else ""
+        self.details.setHtml(
+            f"""
+            <h3>{html.escape(plan.title)}</h3>
+            <p>{html.escape(plan.explanation)}</p>
+            <p><b>Expected graph change</b></p>
+            <ul>{effects}</ul>
+            {warnings_html}
+            <p style="color:#6b7280;">Commands are shown after you choose this preview.</p>
+            """
+        )
+
+    def _accept_selected(self) -> None:
+        row = self.list_widget.currentRow()
+        if row < 0 or row >= len(self.plans):
+            return
+        self.selected_plan = self.plans[row]
+        self.accept()
+
+
 def _empty_preview_html() -> str:
     return """
-    <div style="color:#6b7280;">Select an operation. Gitualizer will show the exact Git commands before execution.</div>
+    <div style="color:#6b7280;">
+      Drag a branch or remote-tracking label onto another branch in the graph.
+      Gitualizer will preview possible strategies, then show exact commands before execution.
+    </div>
     """
 
 

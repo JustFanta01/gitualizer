@@ -67,3 +67,32 @@ def test_staging_selected_paths_keeps_paths_after_separator() -> None:
 
     assert plan.steps[0].args == ["git", "add", "--", "file with spaces.txt"]
     assert "'file with spaces.txt'" in plan.commands_text
+
+
+def test_drag_remote_tracking_onto_local_branch_offers_pull_strategy() -> None:
+    repo_state = state()
+    remote = Reference(
+        name="origin/main",
+        full_name="refs/remotes/origin/main",
+        target="c" * 40,
+        kind="remote_tracking",
+    )
+    local = repo_state.local_branches[0]
+
+    plan = OperationPlanner().integrate_remote_tracking(repo_state, remote, local, "rebase")
+
+    assert plan.steps[0].args == ["git", "switch", "main"]
+    assert plan.steps[1].args == ["git", "fetch", "origin"]
+    assert plan.steps[2].args == ["git", "rebase", "origin/main"]
+    assert plan.history_rewrite is True
+
+
+def test_drag_local_branch_onto_local_branch_can_merge() -> None:
+    repo_state = state()
+    main = repo_state.local_branches[0]
+    feature = repo_state.local_branches[1]
+
+    plan = OperationPlanner().integrate_local_branch(repo_state, feature, main, "merge_source_into_target")
+
+    assert plan.steps[0].args == ["git", "switch", "main"]
+    assert plan.steps[1].args == ["git", "merge", "feature"]

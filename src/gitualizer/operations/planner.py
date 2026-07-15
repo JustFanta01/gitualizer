@@ -158,6 +158,102 @@ class OperationPlanner:
             state_fingerprint=state_fingerprint(state),
         )
 
+    def integrate_remote_tracking(
+        self,
+        state: RepositoryState,
+        remote_ref: Reference,
+        local_ref: Reference,
+        strategy: str,
+    ) -> CommandPlan:
+        if remote_ref.kind != "remote_tracking" or local_ref.kind != "local_branch":
+            raise ValueError("Drag a remote-tracking branch onto a local branch.")
+        remote = remote_ref.name.split("/", 1)[0]
+        if strategy == "ff":
+            title = f"Fast-forward {local_ref.name} from {remote_ref.name}"
+            explanation = (
+                f"Update local `{local_ref.name}` from `{remote_ref.name}` only if Git can move the branch "
+                "pointer forward without creating a merge commit."
+            )
+            merge_args = ["git", "merge", "--ff-only", remote_ref.name]
+            effects = [f"`{local_ref.name}` moves to `{remote_ref.name}` if it is a direct descendant."]
+        elif strategy == "merge":
+            title = f"Merge {remote_ref.name} into {local_ref.name}"
+            explanation = f"Integrate `{remote_ref.name}` into `{local_ref.name}` while preserving both histories."
+            merge_args = ["git", "merge", remote_ref.name]
+            effects = [f"`{local_ref.name}` may get a merge commit.", "Both branch histories are preserved."]
+        elif strategy == "rebase":
+            title = f"Rebase {local_ref.name} onto {remote_ref.name}"
+            explanation = f"Replay commits unique to `{local_ref.name}` on top of `{remote_ref.name}`."
+            return CommandPlan(
+                title=title,
+                explanation=explanation,
+                steps=[
+                    CommandStep(["git", "switch", local_ref.name], f"Make `{local_ref.name}` the current branch."),
+                    CommandStep(["git", "fetch", remote], f"Refresh `{remote}` remote-tracking references."),
+                    CommandStep(["git", "rebase", remote_ref.name], f"Replay `{local_ref.name}` after `{remote_ref.name}`."),
+                ],
+                expected_effects=[
+                    f"`{local_ref.name}` moves to rewritten commits after `{remote_ref.name}`.",
+                    "Local commit hashes may change.",
+                ],
+                warnings=["This rewrites local branch history."],
+                history_rewrite=True,
+                remote_impact="Reads from remote; does not write to it.",
+                state_fingerprint=state_fingerprint(state),
+            )
+        else:
+            raise ValueError("Unknown integration strategy.")
+        return CommandPlan(
+            title=title,
+            explanation=explanation,
+            steps=[
+                CommandStep(["git", "switch", local_ref.name], f"Make `{local_ref.name}` the current branch."),
+                CommandStep(["git", "fetch", remote], f"Refresh `{remote}` remote-tracking references."),
+                CommandStep(merge_args, "Integrate the remote-tracking branch into the local branch."),
+            ],
+            expected_effects=effects,
+            remote_impact="Reads from remote; does not write to it.",
+            state_fingerprint=state_fingerprint(state),
+        )
+
+    def integrate_local_branch(
+        self,
+        state: RepositoryState,
+        source_ref: Reference,
+        target_ref: Reference,
+        strategy: str,
+    ) -> CommandPlan:
+        if source_ref.kind != "local_branch" or target_ref.kind != "local_branch":
+            raise ValueError("Drag one local branch onto another local branch.")
+        if strategy == "merge_source_into_target":
+            return CommandPlan(
+                title=f"Merge {source_ref.name} into {target_ref.name}",
+                explanation=f"Switch to `{target_ref.name}` and merge `{source_ref.name}` into it.",
+                steps=[
+                    CommandStep(["git", "switch", target_ref.name], f"Make `{target_ref.name}` the current branch."),
+                    CommandStep(["git", "merge", source_ref.name], f"Merge `{source_ref.name}` into `{target_ref.name}`."),
+                ],
+                expected_effects=[f"`{target_ref.name}` may move or receive a merge commit."],
+                state_fingerprint=state_fingerprint(state),
+            )
+        if strategy == "rebase_source_onto_target":
+            return CommandPlan(
+                title=f"Rebase {source_ref.name} onto {target_ref.name}",
+                explanation=f"Replay commits unique to `{source_ref.name}` on top of `{target_ref.name}`.",
+                steps=[
+                    CommandStep(["git", "switch", source_ref.name], f"Make `{source_ref.name}` the current branch."),
+                    CommandStep(["git", "rebase", target_ref.name], f"Replay `{source_ref.name}` after `{target_ref.name}`."),
+                ],
+                expected_effects=[
+                    f"`{source_ref.name}` moves to rewritten commits after `{target_ref.name}`.",
+                    "Commit hashes on the rebased branch may change.",
+                ],
+                warnings=["This rewrites local branch history."],
+                history_rewrite=True,
+                state_fingerprint=state_fingerprint(state),
+            )
+        raise ValueError("Unknown branch integration strategy.")
+
 
 def _current_branch_ref(state: RepositoryState) -> Optional[Reference]:
     if not state.head.branch:

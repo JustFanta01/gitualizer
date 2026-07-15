@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from PySide6.QtCore import QPointF, QRectF, Qt
+from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QWidget
 
@@ -19,21 +19,27 @@ class CommitNode:
 
 
 class CommitGraphWidget(QWidget):
+    referenceDropped = Signal(object, object)
+
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self._state: Optional[RepositoryState] = None
         self._preview_plan: Optional[CommandPlan] = None
         self._nodes: dict[str, CommitNode] = {}
-        self._row_spacing = 78
-        self._lane_spacing = 104
-        self.setMinimumSize(520, 420)
+        self._ref_hitboxes: list[tuple[QRectF, Reference]] = []
+        self._drag_ref: Optional[Reference] = None
+        self._drag_pos: Optional[QPoint] = None
+        self._row_spacing = 64
+        self._lane_spacing = 88
+        self.setMinimumSize(420, 340)
+        self.setMouseTracking(True)
 
     def set_state(self, state: Optional[RepositoryState]) -> None:
         self._state = state
         self._nodes = self._layout_nodes(state)
         row_count = max(len(self._nodes), 8)
         lane_count = max((int(node.x) for node in self._nodes.values()), default=1)
-        self.setMinimumHeight(110 + row_count * self._row_spacing)
+        self.setMinimumHeight(92 + row_count * self._row_spacing)
         self.setMinimumWidth(max(560, lane_count + 480))
         self.update()
 
@@ -66,7 +72,7 @@ class CommitGraphWidget(QWidget):
             nodes[commit.oid] = CommitNode(
                 oid=commit.oid,
                 x=78 + lane * self._lane_spacing,
-                y=176 + index * self._row_spacing,
+                y=136 + index * self._row_spacing,
             )
         return nodes
 
@@ -74,6 +80,7 @@ class CommitGraphWidget(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.fillRect(self.rect(), QColor("#ffffff"))
+        self._ref_hitboxes = []
         self._draw_grid(painter)
         if self._state is None:
             self._draw_empty(painter, "Open a Git repository to inspect it.")
@@ -85,6 +92,7 @@ class CommitGraphWidget(QWidget):
         self._draw_preview(painter)
         self._draw_edges(painter)
         self._draw_commits(painter)
+        self._draw_drag(painter)
 
     def _draw_empty(self, painter: QPainter, text: str) -> None:
         painter.setPen(QColor("#666a73"))
@@ -101,10 +109,10 @@ class CommitGraphWidget(QWidget):
             ("Staging Area / Index", f"{staged} staged", QColor("#b45309")),
             ("HEAD", head, QColor("#1f6feb")),
         ]
-        x = 34.0
-        y = 28.0
-        width = 190.0
-        height = 74.0
+        x = 24.0
+        y = 22.0
+        width = 150.0
+        height = 58.0
         for index, (title, subtitle, color) in enumerate(flow):
             rect = QRectF(x, y, width, height)
             active = self._preview_targets_flow(title)
@@ -112,19 +120,19 @@ class CommitGraphWidget(QWidget):
             painter.setBrush(QColor(color.red(), color.green(), color.blue(), 22 if active else 10))
             painter.drawRoundedRect(rect, 8, 8)
             painter.setPen(QColor("#1f2933"))
-            painter.setFont(QFont("Sans Serif", 10, QFont.Weight.Bold))
-            painter.drawText(rect.adjusted(14, 12, -14, -36), Qt.AlignmentFlag.AlignLeft, title)
-            painter.setFont(QFont("Sans Serif", 9))
+            painter.setFont(QFont("Sans Serif", 8, QFont.Weight.Bold))
+            painter.drawText(rect.adjusted(10, 9, -10, -30), Qt.AlignmentFlag.AlignLeft, title)
+            painter.setFont(QFont("Sans Serif", 8))
             painter.setPen(QColor("#52616f"))
-            painter.drawText(rect.adjusted(14, 38, -14, -10), Qt.AlignmentFlag.AlignLeft, subtitle)
+            painter.drawText(rect.adjusted(10, 30, -10, -8), Qt.AlignmentFlag.AlignLeft, subtitle)
             if index < len(flow) - 1:
                 painter.setPen(QPen(QColor("#9aa7b4"), 2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-                start = QPointF(x + width + 8, y + height / 2)
-                end = QPointF(x + width + 56, y + height / 2)
+                start = QPointF(x + width + 6, y + height / 2)
+                end = QPointF(x + width + 38, y + height / 2)
                 painter.drawLine(start, end)
                 painter.drawLine(end, QPointF(end.x() - 8, end.y() - 6))
                 painter.drawLine(end, QPointF(end.x() - 8, end.y() + 6))
-            x += width + 64
+            x += width + 46
 
     def _preview_targets_flow(self, title: str) -> bool:
         if self._preview_plan is None:
@@ -142,7 +150,7 @@ class CommitGraphWidget(QWidget):
         painter.setPen(QPen(QColor("#edf2f7"), 1))
         x = 78
         while x < self.width():
-            painter.drawLine(QPointF(x, 148), QPointF(x, self.height()))
+            painter.drawLine(QPointF(x, 104), QPointF(x, self.height()))
             x += self._lane_spacing
 
     def _draw_preview(self, painter: QPainter) -> None:
@@ -207,7 +215,7 @@ class CommitGraphWidget(QWidget):
             painter.drawEllipse(QPointF(node.x, node.y), 9, 9)
 
             painter.setPen(QColor("#20242a"))
-            painter.setFont(QFont("Sans Serif", 9))
+            painter.setFont(QFont("Sans Serif", 8))
             label = f"{commit.short_oid}  {commit.subject}"
             painter.drawText(QRectF(node.x + 22, node.y - 14, max(260, self.width() - node.x - 44), 22), label)
 
@@ -227,9 +235,67 @@ class CommitGraphWidget(QWidget):
             painter.setFont(QFont("Sans Serif", 8))
             width = painter.fontMetrics().horizontalAdvance(text) + 14
             rect = QRectF(x + offset, y, width, 22)
+            if ref.kind != "head":
+                self._ref_hitboxes.append((rect, ref))
             painter.setPen(QPen(color, 1))
             painter.setBrush(QColor(color.red(), color.green(), color.blue(), 28))
             painter.drawRoundedRect(rect, 6, 6)
             painter.setPen(color)
             painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
             offset += width + 6
+
+    def _draw_drag(self, painter: QPainter) -> None:
+        if self._drag_ref is None or self._drag_pos is None:
+            return
+        text = self._drag_ref.name
+        painter.setFont(QFont("Sans Serif", 8, QFont.Weight.Bold))
+        width = painter.fontMetrics().horizontalAdvance(text) + 18
+        rect = QRectF(self._drag_pos.x() + 12, self._drag_pos.y() + 12, width, 24)
+        painter.setPen(QPen(QColor("#1f6feb"), 1))
+        painter.setBrush(QColor(31, 111, 235, 36))
+        painter.drawRoundedRect(rect, 6, 6)
+        painter.setPen(QColor("#1f6feb"))
+        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() != Qt.MouseButton.LeftButton:
+            super().mousePressEvent(event)
+            return
+        ref = self._reference_at(event.position().toPoint())
+        if ref is not None:
+            self._drag_ref = ref
+            self._drag_pos = event.position().toPoint()
+            self.update()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        if self._drag_ref is not None:
+            self._drag_pos = event.position().toPoint()
+            self.update()
+            return
+        if self._reference_at(event.position().toPoint()) is not None:
+            self.setCursor(Qt.CursorShape.OpenHandCursor)
+        else:
+            self.unsetCursor()
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        if self._drag_ref is None:
+            super().mouseReleaseEvent(event)
+            return
+        source = self._drag_ref
+        self._drag_ref = None
+        self._drag_pos = None
+        target = self._reference_at(event.position().toPoint())
+        self.update()
+        if target is not None and target.name != source.name:
+            self.referenceDropped.emit(source, target)
+            return
+        super().mouseReleaseEvent(event)
+
+    def _reference_at(self, pos: QPoint) -> Optional[Reference]:
+        for rect, ref in reversed(self._ref_hitboxes):
+            if rect.contains(pos):
+                return ref
+        return None
