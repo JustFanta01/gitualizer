@@ -128,3 +128,30 @@ def test_drag_commit_onto_commit_creates_replay_branch_plan() -> None:
 
     assert plan.steps[0].args == ["git", "switch", "-c", "gitualizer/replay-bbbbbbbbbbbb-after-cccccccccccc", "c" * 40]
     assert plan.steps[1].args == ["git", "cherry-pick", "b" * 40]
+    assert plan.preview_steps
+
+
+def test_drop_commit_on_branch_can_cherry_pick_or_revert() -> None:
+    repo_state = state()
+    source = Commit("b" * 40, "b" * 12, tuple(), "A", "a@example.invalid", "2024-01-01T00:00:00+00:00", "source")
+    branch = repo_state.local_branches[0]
+
+    cherry_pick = OperationPlanner().cherry_pick_commit_to_branch(repo_state, source, branch)
+    revert = OperationPlanner().revert_commit_on_branch(repo_state, source, branch)
+
+    assert cherry_pick.steps[1].args == ["git", "cherry-pick", "b" * 40]
+    assert revert.steps[1].args == ["git", "revert", "--no-edit", "b" * 40]
+
+
+def test_drop_branch_on_commit_can_reset_or_create_branch() -> None:
+    repo_state = state()
+    branch = repo_state.local_branches[0]
+    target = Commit("c" * 40, "c" * 12, tuple(), "A", "a@example.invalid", "2024-01-01T00:00:00+00:00", "target")
+
+    reset = OperationPlanner().reset_branch_to_commit(repo_state, branch, target, "hard")
+    create = OperationPlanner().create_branch_at_commit(repo_state, target, "recover-here")
+
+    assert reset.destructive is True
+    assert reset.history_rewrite is True
+    assert reset.steps[1].args == ["git", "reset", "--hard", "c" * 40]
+    assert create.steps[0].args == ["git", "branch", "recover-here", "c" * 40]

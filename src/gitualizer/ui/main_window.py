@@ -121,6 +121,8 @@ class MainWindow(QMainWindow):
         self.refresh_button.clicked.connect(self.refresh)
         self.path_edit.returnPressed.connect(self.refresh)
         self.graph.referenceDropped.connect(self._handle_reference_drop)
+        self.graph.referenceDroppedOnCommit.connect(self._handle_reference_drop_on_commit)
+        self.graph.commitDroppedOnReference.connect(self._handle_commit_drop_on_reference)
         self.graph.stageDroppedOnBranch.connect(self._handle_stage_drop_on_branch)
         self.graph.commitDroppedOnCommit.connect(self._handle_commit_drop_on_commit)
         self.file_status.changesDroppedToStage.connect(self._handle_changes_drop_to_stage)
@@ -416,6 +418,58 @@ class MainWindow(QMainWindow):
             return
         self._execute_plan(plan)
 
+    def _handle_commit_drop_on_reference(self, source: Commit, target: Reference) -> None:
+        if self.state is None:
+            return
+        if target.kind != "local_branch":
+            QMessageBox.information(self, "Operation Not Available", "Drop commits onto local branches for cherry-pick or revert.")
+            return
+        plans = [
+            self.planner.cherry_pick_commit_to_branch(self.state, source, target),
+            self.planner.revert_commit_on_branch(self.state, source, target),
+        ]
+        self._choose_preview_and_execute(source.short_oid, target.name, plans)
+
+    def _handle_reference_drop_on_commit(self, source: Reference, target: Commit) -> None:
+        if self.state is None:
+            return
+        if source.kind != "local_branch":
+            QMessageBox.information(self, "Operation Not Available", "Drop local branches onto commits to reset or move them.")
+            return
+        plans = [
+            self.planner.reset_branch_to_commit(self.state, source, target, "soft"),
+            self.planner.reset_branch_to_commit(self.state, source, target, "mixed"),
+            self.planner.reset_branch_to_commit(self.state, source, target, "hard"),
+        ]
+        branch_name, accepted = QInputDialog.getText(
+            self,
+            "Optional New Branch",
+            f"To avoid moving `{source.name}`, enter a new branch name at `{target.short_oid}`. Leave empty to choose reset.",
+        )
+        if accepted and branch_name.strip():
+            try:
+                plan = self.planner.create_branch_at_commit(self.state, target, branch_name)
+            except ValueError as exc:
+                QMessageBox.information(self, "Operation Not Available", str(exc))
+                return
+            self._preview_and_confirm(plan)
+            return
+        self._choose_preview_and_execute(source.name, target.short_oid, plans)
+
+    def _choose_preview_and_execute(self, source_label: str, target_label: str, plans: list[CommandPlan]) -> None:
+        dialog = OperationChoiceDialogLabels(source_label, target_label, plans, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted or dialog.selected_plan is None:
+            return
+        self._preview_and_confirm(dialog.selected_plan)
+
+    def _preview_and_confirm(self, plan: CommandPlan) -> None:
+        self.graph.set_preview_plan(plan)
+        self.command_panel.setHtml(_render_plan_html(plan, details_open=False))
+        confirm = CommandPlanDialog(plan, self)
+        if confirm.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._execute_plan(plan)
+
     def _workspace_mode(self) -> None:
         self.working_panel.show()
         self.graph_scroll.show()
@@ -556,6 +610,56 @@ class OperationChoiceDialog(QDialog):
         self.accept()
 
 
+class OperationChoiceDialogLabels(QDialog):
+    def __init__(
+        self,
+        source_label: str,
+        target_label: str,
+        plans: list[CommandPlan],
+        parent: Optional[QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
+        self.plans = plans
+        self.selected_plan: Optional[CommandPlan] = None
+        self.setWindowTitle("Choose Graph Operation")
+        self.resize(640, 430)
+        layout = QVBoxLayout(self)
+        intro = QLabel(
+            f"You dragged `{source_label}` onto `{target_label}`. Choose the Git strategy that matches the graph change you expect."
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+        self.list_widget = QListWidget()
+        for index, plan in enumerate(plans):
+            item = QListWidgetItem(plan.title)
+            item.setData(Qt.ItemDataRole.UserRole, index)
+            self.list_widget.addItem(item)
+        self.list_widget.setCurrentRow(0)
+        layout.addWidget(self.list_widget)
+        self.details = QTextBrowser()
+        self.details.setMinimumHeight(160)
+        layout.addWidget(self.details)
+        self.list_widget.currentRowChanged.connect(self._show_plan)
+        self._show_plan(0)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Ok)
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Preview This Change")
+        buttons.accepted.connect(self._accept_selected)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _show_plan(self, row: int) -> None:
+        if row < 0 or row >= len(self.plans):
+            return
+        self.details.setHtml(_render_plan_html(self.plans[row], details_open=True))
+
+    def _accept_selected(self) -> None:
+        row = self.list_widget.currentRow()
+        if row < 0 or row >= len(self.plans):
+            return
+        self.selected_plan = self.plans[row]
+        self.accept()
+
+
 def _empty_preview_html() -> str:
     return """
     <div style="color:#6b7280;">
@@ -580,9 +684,11 @@ def _render_plan_html(plan: CommandPlan, details_open: bool) -> str:
             "<div style='color:#6b7280; margin-top:10px;'>"
             "Open the confirmation details to inspect expected effects, warnings, and impact.</div>"
         )
+    preview = _preview_steps_html(plan)
     return f"""
     <h2 style="color:#1f2933;">{html.escape(plan.title)}</h2>
     <p>{html.escape(plan.explanation)}</p>
+    {preview}
     {command_block}
     {details}
     """
@@ -608,6 +714,18 @@ def _details_html(plan: CommandPlan) -> str:
     """
 
 
+def _preview_steps_html(plan: CommandPlan) -> str:
+    if not plan.preview_steps:
+        return ""
+    steps = "".join(f"<li>{html.escape(step)}</li>" for step in plan.preview_steps)
+    return f"""
+    <div style="background:#f3f8ff; border:1px solid #b9d7ff; border-radius:6px; padding:8px; margin:8px 0;">
+      <b>Step-by-step graph preview</b>
+      <ol>{steps}</ol>
+    </div>
+    """
+
+
 def _render_plan_text(plan: CommandPlan) -> str:
     lines = [
         plan.title,
@@ -623,6 +741,8 @@ def _render_plan_text(plan: CommandPlan) -> str:
     ]
     if plan.expected_effects:
         lines.extend(["", "Expected effects:", *[f"- {effect}" for effect in plan.expected_effects]])
+    if plan.preview_steps:
+        lines.extend(["", "Preview steps:", *[f"{index + 1}. {step}" for index, step in enumerate(plan.preview_steps)]])
     if plan.warnings:
         lines.extend(["", "Warnings:", *[f"- {warning}" for warning in plan.warnings]])
     return "\n".join(lines)

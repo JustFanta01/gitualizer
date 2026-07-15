@@ -19,6 +19,7 @@ class CommandPlan:
     explanation: str
     steps: list[CommandStep]
     expected_effects: list[str] = field(default_factory=list)
+    preview_steps: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     history_rewrite: bool = False
     destructive: bool = False

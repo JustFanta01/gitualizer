@@ -33,6 +33,7 @@ class OperationPlanner:
             explanation=f"Change the working tree and HEAD to the local branch `{branch}`.",
             steps=[CommandStep(["git", "switch", branch], "Switch to the selected local branch.")],
             expected_effects=[f"HEAD moves to `{branch}`.", "Git may refuse if local changes would be overwritten."],
+            preview_steps=[f"HEAD detaches from `{state.head.branch or 'current position'}`.", f"HEAD attaches to `{branch}`."],
             state_fingerprint=state_fingerprint(state),
         )
 
@@ -48,6 +49,7 @@ class OperationPlanner:
             explanation=f"Create a new local branch named `{branch}` at {start}.",
             steps=[CommandStep(["git", "branch", branch], "Create the branch without switching to it.")],
             expected_effects=[f"`{branch}` will point at the current commit.", "The current branch will not change."],
+            preview_steps=[f"Create a new branch label `{branch}` at {start}."],
             state_fingerprint=state_fingerprint(state),
         )
 
@@ -59,6 +61,7 @@ class OperationPlanner:
             explanation="Move all current working tree changes into the staging area.",
             steps=[CommandStep(["git", "add", "-A"], "Stage modifications, deletions, and untracked files.")],
             expected_effects=["Files move from Working Tree to Staging Area."],
+            preview_steps=["Working tree changes become index entries.", "No commit is created yet."],
             state_fingerprint=state_fingerprint(state),
         )
 
@@ -71,6 +74,7 @@ class OperationPlanner:
             explanation="Move the selected paths into the staging area.",
             steps=[CommandStep(["git", "add", "--", *paths], "Stage only the selected paths.")],
             expected_effects=["Selected files move from Working Tree to Staging Area."],
+            preview_steps=[f"Stage {len(paths)} selected path(s) into the index.", "HEAD and branch refs do not move."],
             state_fingerprint=state_fingerprint(state),
         )
 
@@ -82,6 +86,7 @@ class OperationPlanner:
             explanation="Move all staged changes back out of the index.",
             steps=[CommandStep(["git", "restore", "--staged", "--", "."], "Unstage all staged paths.")],
             expected_effects=["Files move from Staging Area back to Working Tree."],
+            preview_steps=["Index entries are restored from HEAD.", "File contents remain in the working tree."],
             state_fingerprint=state_fingerprint(state),
         )
 
@@ -94,6 +99,7 @@ class OperationPlanner:
             explanation="Move the selected staged paths back out of the index.",
             steps=[CommandStep(["git", "restore", "--staged", "--", *paths], "Unstage only the selected paths.")],
             expected_effects=["Selected files move from Staging Area back to Working Tree."],
+            preview_steps=[f"Move {len(paths)} staged path(s) out of the index.", "No file content is discarded."],
             state_fingerprint=state_fingerprint(state),
         )
 
@@ -118,6 +124,7 @@ class OperationPlanner:
             explanation="Remove the selected changes from the working tree and/or index.",
             steps=steps,
             expected_effects=["Selected file changes disappear from the working tree and index."],
+            preview_steps=["Remove selected uncommitted changes from the visible file-state graph."],
             warnings=["This is destructive. Discarded uncommitted file contents may not be recoverable from Git."],
             destructive=True,
             state_fingerprint=state_fingerprint(state),
@@ -134,6 +141,7 @@ class OperationPlanner:
             explanation="Create a new commit from the current staging area.",
             steps=[CommandStep(["git", "commit", "-m", message], "Commit staged changes with the provided message.")],
             expected_effects=["A new commit will be created.", "The current branch will move to that commit."],
+            preview_steps=["Create a new commit node from the index.", f"Move `{state.head.branch or 'HEAD'}` to the new commit."],
             state_fingerprint=state_fingerprint(state),
         )
 
@@ -158,6 +166,11 @@ class OperationPlanner:
                 "A new commit node will be created from the index.",
                 f"`{branch}` will move to the new commit.",
             ],
+            preview_steps=[
+                f"Attach HEAD to `{branch}` if it is not already current.",
+                "Create a new commit node from the staging area.",
+                f"Move `{branch}` to the new commit.",
+            ],
             state_fingerprint=state_fingerprint(state),
         )
 
@@ -170,6 +183,7 @@ class OperationPlanner:
             explanation="Update local remote-tracking references from the selected remote.",
             steps=[CommandStep(["git", "fetch", remote], f"Fetch objects and update `{remote}/...` tracking refs.")],
             expected_effects=["Remote-tracking branches may move.", "Local branches are not modified by fetch."],
+            preview_steps=[f"Update local remote-tracking refs for `{remote}`.", "Do not move local branch labels."],
             remote_impact="Reads from remote; does not write to it.",
             state_fingerprint=state_fingerprint(state),
         )
@@ -188,6 +202,11 @@ class OperationPlanner:
                 CommandStep(["git", "merge", "--ff-only", current.upstream], "Fast-forward to the upstream branch."),
             ],
             expected_effects=[f"`{current.name}` may move forward.", "Git will refuse if histories have diverged."],
+            preview_steps=[
+                "Refresh remote-tracking refs.",
+                f"If possible, move `{current.name}` forward to `{current.upstream}`.",
+                "No merge commit is created.",
+            ],
             state_fingerprint=state_fingerprint(state),
         )
 
@@ -203,6 +222,7 @@ class OperationPlanner:
             explanation=f"Update the configured upstream branch from local `{current.name}`.",
             steps=[CommandStep(["git", "push", remote, current.name], "Push the current branch to its upstream remote.")],
             expected_effects=["The remote branch may move forward if the push is a fast-forward."],
+            preview_steps=[f"Move the remote branch for `{current.name}` to the local branch tip if the remote accepts it."],
             warnings=["Git will reject this push if it is not a fast-forward."],
             remote_impact=f"May update `{current.upstream}` on `{remote}`.",
             state_fingerprint=state_fingerprint(state),
@@ -246,6 +266,12 @@ class OperationPlanner:
                     f"`{local_ref.name}` moves to rewritten commits after `{remote_ref.name}`.",
                     "Local commit hashes may change.",
                 ],
+                preview_steps=[
+                    f"Fetch `{remote}`.",
+                    f"Copy commits unique to `{local_ref.name}` after `{remote_ref.name}`.",
+                    f"Move `{local_ref.name}` to the copied commits.",
+                    "Old copied commits may become unreferenced.",
+                ],
                 warnings=["This rewrites local branch history."],
                 history_rewrite=True,
                 remote_impact="Reads from remote; does not write to it.",
@@ -262,6 +288,11 @@ class OperationPlanner:
                 CommandStep(merge_args, "Integrate the remote-tracking branch into the local branch."),
             ],
             expected_effects=effects,
+            preview_steps=[
+                f"Fetch `{remote}`.",
+                f"Attach HEAD to `{local_ref.name}`.",
+                f"Integrate `{remote_ref.name}` into `{local_ref.name}`.",
+            ],
             remote_impact="Reads from remote; does not write to it.",
             state_fingerprint=state_fingerprint(state),
         )
@@ -284,6 +315,11 @@ class OperationPlanner:
                     CommandStep(["git", "merge", source_ref.name], f"Merge `{source_ref.name}` into `{target_ref.name}`."),
                 ],
                 expected_effects=[f"`{target_ref.name}` may move or receive a merge commit."],
+                preview_steps=[
+                    f"Attach HEAD to `{target_ref.name}`.",
+                    f"Merge `{source_ref.name}` into `{target_ref.name}`.",
+                    "Create a merge commit if fast-forward is not possible.",
+                ],
                 state_fingerprint=state_fingerprint(state),
             )
         if strategy == "rebase_source_onto_target":
@@ -297,6 +333,11 @@ class OperationPlanner:
                 expected_effects=[
                     f"`{source_ref.name}` moves to rewritten commits after `{target_ref.name}`.",
                     "Commit hashes on the rebased branch may change.",
+                ],
+                preview_steps=[
+                    f"Attach HEAD to `{source_ref.name}`.",
+                    f"Replay commits unique to `{source_ref.name}` after `{target_ref.name}`.",
+                    f"Move `{source_ref.name}` to the rewritten commits.",
                 ],
                 warnings=["This rewrites local branch history."],
                 history_rewrite=True,
@@ -325,7 +366,90 @@ class OperationPlanner:
                 f"A new commit equivalent to `{source.short_oid}` may be created after `{target.short_oid}`.",
                 "Existing branches are not moved by this plan.",
             ],
+            preview_steps=[
+                f"Create `{branch}` at `{target.short_oid}`.",
+                f"Cherry-pick `{source.short_oid}` onto the new branch.",
+                "Show conflicts if Git cannot apply the patch cleanly.",
+            ],
             warnings=["Cherry-pick may stop for conflicts. If it does, Gitualizer will show the command failure and refreshed state."],
+            state_fingerprint=state_fingerprint(state),
+        )
+
+    def create_branch_at_commit(self, state: RepositoryState, commit: Commit, branch: str) -> CommandPlan:
+        branch = branch.strip()
+        if not branch:
+            raise ValueError("Enter a branch name.")
+        if any(ref.name == branch and ref.kind == "local_branch" for ref in state.references):
+            raise ValueError("A local branch with that name already exists.")
+        return CommandPlan(
+            title=f"Create branch {branch} at {commit.short_oid}",
+            explanation=f"Create a new local branch label at commit `{commit.short_oid}`.",
+            steps=[CommandStep(["git", "branch", branch, commit.oid], "Create the branch at the selected commit.")],
+            expected_effects=[f"`{branch}` points to `{commit.short_oid}`.", "HEAD does not move."],
+            preview_steps=[f"Attach a new branch label `{branch}` to commit `{commit.short_oid}`."],
+            state_fingerprint=state_fingerprint(state),
+        )
+
+    def cherry_pick_commit_to_branch(self, state: RepositoryState, source: Commit, branch: Reference) -> CommandPlan:
+        if branch.kind != "local_branch":
+            raise ValueError("Drop a commit onto a local branch.")
+        return CommandPlan(
+            title=f"Cherry-pick {source.short_oid} onto {branch.name}",
+            explanation=f"Apply the change introduced by `{source.short_oid}` on top of `{branch.name}`.",
+            steps=[
+                CommandStep(["git", "switch", branch.name], f"Attach HEAD to `{branch.name}`."),
+                CommandStep(["git", "cherry-pick", source.oid], f"Apply `{source.short_oid}`."),
+            ],
+            expected_effects=[f"`{branch.name}` may move to a new commit equivalent to `{source.short_oid}`."],
+            preview_steps=[
+                f"Attach HEAD to `{branch.name}`.",
+                f"Create a new commit on `{branch.name}` with the patch from `{source.short_oid}`.",
+            ],
+            warnings=["Cherry-pick may stop for conflicts."],
+            state_fingerprint=state_fingerprint(state),
+        )
+
+    def revert_commit_on_branch(self, state: RepositoryState, source: Commit, branch: Reference) -> CommandPlan:
+        if branch.kind != "local_branch":
+            raise ValueError("Drop a commit onto a local branch.")
+        return CommandPlan(
+            title=f"Revert {source.short_oid} on {branch.name}",
+            explanation=f"Create a new commit on `{branch.name}` that undoes `{source.short_oid}`.",
+            steps=[
+                CommandStep(["git", "switch", branch.name], f"Attach HEAD to `{branch.name}`."),
+                CommandStep(["git", "revert", "--no-edit", source.oid], f"Create a revert commit for `{source.short_oid}`."),
+            ],
+            expected_effects=[f"`{branch.name}` moves to a new revert commit."],
+            preview_steps=[
+                f"Attach HEAD to `{branch.name}`.",
+                f"Create a new commit that applies the inverse patch of `{source.short_oid}`.",
+            ],
+            warnings=["Revert may stop for conflicts."],
+            state_fingerprint=state_fingerprint(state),
+        )
+
+    def reset_branch_to_commit(self, state: RepositoryState, branch: Reference, commit: Commit, mode: str) -> CommandPlan:
+        if branch.kind != "local_branch":
+            raise ValueError("Drag a local branch onto a commit.")
+        if mode not in {"soft", "mixed", "hard"}:
+            raise ValueError("Unknown reset mode.")
+        destructive = mode == "hard"
+        return CommandPlan(
+            title=f"Reset {branch.name} to {commit.short_oid} ({mode})",
+            explanation=f"Move `{branch.name}` to `{commit.short_oid}` using `git reset --{mode}`.",
+            steps=[
+                CommandStep(["git", "switch", branch.name], f"Attach HEAD to `{branch.name}`."),
+                CommandStep(["git", "reset", f"--{mode}", commit.oid], f"Move `{branch.name}` to `{commit.short_oid}`."),
+            ],
+            expected_effects=[f"`{branch.name}` points to `{commit.short_oid}`."],
+            preview_steps=[
+                f"Attach HEAD to `{branch.name}`.",
+                f"Move the `{branch.name}` label to `{commit.short_oid}`.",
+                _reset_mode_preview(mode),
+            ],
+            warnings=[_reset_mode_warning(mode)] if destructive else [_reset_mode_preview(mode)],
+            destructive=destructive,
+            history_rewrite=True,
             state_fingerprint=state_fingerprint(state),
         )
 
@@ -345,3 +469,17 @@ def _paths_for_changes(changes: list[FileChange]) -> list[str]:
         if change.path not in paths:
             paths.append(change.path)
     return paths
+
+
+def _reset_mode_preview(mode: str) -> str:
+    if mode == "soft":
+        return "Keep index and working tree changes staged."
+    if mode == "mixed":
+        return "Reset the index, but keep file contents in the working tree."
+    return "Reset index and working tree to the target commit."
+
+
+def _reset_mode_warning(mode: str) -> str:
+    if mode == "hard":
+        return "Hard reset discards uncommitted working tree and index changes."
+    return _reset_mode_preview(mode)

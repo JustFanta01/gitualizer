@@ -20,6 +20,8 @@ class CommitNode:
 
 class CommitGraphWidget(QWidget):
     referenceDropped = Signal(object, object)
+    referenceDroppedOnCommit = Signal(object, object)
+    commitDroppedOnReference = Signal(object, object)
     stageDroppedOnBranch = Signal(object)
     commitDroppedOnCommit = Signal(object, object)
 
@@ -338,7 +340,15 @@ class CommitGraphWidget(QWidget):
             if target is not None and target.name != source_ref.name:
                 self.referenceDropped.emit(source_ref, target)
                 return
+            target_commit = self._commit_at(event.position().toPoint())
+            if target_commit is not None:
+                self.referenceDroppedOnCommit.emit(source_ref, target_commit)
+                return
         if source_commit is not None:
+            target_ref = self._reference_at(event.position().toPoint())
+            if target_ref is not None:
+                self.commitDroppedOnReference.emit(source_commit, target_ref)
+                return
             target_commit = self._commit_at(event.position().toPoint())
             if target_commit is not None and target_commit.oid != source_commit.oid:
                 self.commitDroppedOnCommit.emit(source_commit, target_commit)
