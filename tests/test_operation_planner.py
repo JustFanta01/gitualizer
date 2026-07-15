@@ -97,6 +97,51 @@ def test_drag_local_branch_onto_remote_tracking_pushes_to_remote_branch() -> Non
     assert "fast-forward" in plan.warnings[0]
 
 
+def test_drag_branches_to_trash_creates_delete_plans() -> None:
+    repo_state = state()
+    local = repo_state.local_branches[1]
+    remote = Reference(
+        name="origin/feature",
+        full_name="refs/remotes/origin/feature",
+        target="b" * 40,
+        kind="remote_tracking",
+    )
+
+    local_plan = OperationPlanner().delete_local_branch(repo_state, local)
+    force_local_plan = OperationPlanner().delete_local_branch(repo_state, local, force=True)
+    remote_plan = OperationPlanner().delete_remote_branch(repo_state, remote)
+
+    assert local_plan.steps[0].args == ["git", "branch", "-d", "feature"]
+    assert local_plan.destructive is True
+    assert "deleted local branch label" in "\n".join(local_plan.graph_preview)
+
+    assert force_local_plan.steps[0].args == ["git", "branch", "-D", "feature"]
+    assert "FORCE DELETE" in force_local_plan.warnings[0]
+    assert force_local_plan.destructive is True
+
+    assert remote_plan.steps[0].args == ["git", "push", "origin", "--delete", "feature"]
+    assert remote_plan.steps[1].args == ["git", "fetch", "origin", "--prune"]
+    assert remote_plan.destructive is True
+    assert "DANGEROUS REMOTE OPERATION" in remote_plan.warnings[0]
+    assert "Deletes `feature` on `origin`." == remote_plan.remote_impact
+
+
+def test_delete_branch_rejects_current_branch_and_remote_head() -> None:
+    repo_state = state()
+    remote_head = Reference(
+        name="origin/HEAD",
+        full_name="refs/remotes/origin/HEAD",
+        target="a" * 40,
+        kind="remote_tracking",
+    )
+
+    with pytest.raises(ValueError):
+        OperationPlanner().delete_local_branch(repo_state, repo_state.local_branches[0])
+
+    with pytest.raises(ValueError):
+        OperationPlanner().delete_remote_branch(repo_state, remote_head)
+
+
 def test_staging_selected_paths_keeps_paths_after_separator() -> None:
     plan = OperationPlanner().stage_paths(state(), [FileChange(path="file with spaces.txt", area="working_tree", code="M")])
 
@@ -242,6 +287,9 @@ def test_graph_changing_plans_have_graph_previews() -> None:
         planner.fast_forward_current_branch(repo_state),
         planner.push_current_branch(repo_state),
         planner.push_branch_to_remote_tracking(repo_state, main, remote),
+        planner.delete_local_branch(repo_state, feature),
+        planner.delete_local_branch(repo_state, feature, force=True),
+        planner.delete_remote_branch(repo_state, remote),
         planner.integrate_remote_tracking(repo_state, remote, main, "ff"),
         planner.integrate_remote_tracking(repo_state, remote, main, "merge"),
         planner.integrate_remote_tracking(repo_state, remote, main, "rebase"),

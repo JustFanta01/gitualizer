@@ -103,6 +103,8 @@ class MainWindow(QMainWindow):
 
         self.graph_scroll = graph_scroll
         self.graph_scroll.verticalScrollBar().valueChanged.connect(self._maybe_load_more_commits)
+        self.graph_scroll.verticalScrollBar().valueChanged.connect(lambda _value: self._sync_graph_viewport())
+        self.graph_scroll.horizontalScrollBar().valueChanged.connect(lambda _value: self._sync_graph_viewport())
         self.main_splitter = QSplitter()
         self.main_splitter.addWidget(self.working_panel)
         self.main_splitter.addWidget(self.graph_scroll)
@@ -132,6 +134,7 @@ class MainWindow(QMainWindow):
         self.graph.stageDroppedOnBranch.connect(self._handle_stage_drop_on_branch)
         self.graph.commitDroppedOnCommit.connect(self._handle_commit_drop_on_commit)
         self.graph.commitDroppedToTrash.connect(self._handle_commit_drop_to_trash)
+        self.graph.referenceDroppedToTrash.connect(self._handle_reference_drop_to_trash)
         self.graph.commitContextRequested.connect(self._show_commit_context_menu)
         self.graph.referenceContextRequested.connect(self._show_reference_context_menu)
         self.file_status.changesDroppedToStage.connect(self._handle_changes_drop_to_stage)
@@ -152,6 +155,7 @@ class MainWindow(QMainWindow):
             self.refresh()
         else:
             self._set_enabled(False)
+        self._sync_graph_viewport()
 
     def _build_menus(self) -> None:
         file_menu = self.menuBar().addMenu("File")
@@ -308,6 +312,21 @@ class MainWindow(QMainWindow):
         if value >= bar.maximum() - 80:
             self.commit_limit += 300
             self.refresh(show_errors=False)
+
+    def _sync_graph_viewport(self) -> None:
+        if not hasattr(self, "graph_scroll"):
+            return
+        viewport = self.graph_scroll.viewport()
+        self.graph.set_viewport(
+            self.graph_scroll.horizontalScrollBar().value(),
+            self.graph_scroll.verticalScrollBar().value(),
+            viewport.width(),
+            viewport.height(),
+        )
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._sync_graph_viewport()
 
     def _set_changes(self, changes: list[FileChange]) -> None:
         self.file_status.set_changes(changes)
@@ -604,6 +623,45 @@ class MainWindow(QMainWindow):
             )
             return
         self._choose_preview_and_execute(source.short_oid, "trash", plans)
+
+    def _handle_reference_drop_to_trash(self, source: Reference) -> None:
+        if self.state is None:
+            return
+        try:
+            if source.kind == "local_branch":
+                plans = [
+                    self.planner.delete_local_branch(self.state, source),
+                    self.planner.delete_local_branch(self.state, source, force=True),
+                ]
+                self._choose_preview_and_execute(source.name, "trash", plans)
+                return
+            elif source.kind == "remote_tracking":
+                plan = self.planner.delete_remote_branch(self.state, source)
+            else:
+                QMessageBox.information(self, "Operation Not Available", "Only local and remote-tracking branches can be deleted.")
+                return
+        except ValueError as exc:
+            QMessageBox.information(self, "Operation Not Available", str(exc))
+            return
+        if source.kind == "remote_tracking":
+            proceed = QMessageBox.warning(
+                self,
+                "Dangerous Remote Branch Deletion",
+                (
+                    f"This will ask the remote repository to delete `{source.name}`.\n\n"
+                    "That can remove the branch for everyone using that remote. Continue to command preview?"
+                ),
+                QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Ok,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if proceed != QMessageBox.StandardButton.Ok:
+                return
+        self.graph.set_preview_plan(plan)
+        self.command_panel.setHtml(_render_plan_html(plan, details_open=True))
+        confirm = CommandPlanDialog(plan, self)
+        if confirm.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._execute_plan(plan)
 
     def _handle_commit_drop_on_reference(self, source: Commit, target: Reference) -> None:
         if self.state is None:

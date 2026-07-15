@@ -324,6 +324,83 @@ class OperationPlanner:
             state_fingerprint=state_fingerprint(state),
         )
 
+    def delete_local_branch(self, state: RepositoryState, branch: Reference, *, force: bool = False) -> CommandPlan:
+        if branch.kind != "local_branch":
+            raise ValueError("Drag a local branch to the trash.")
+        if branch.name == state.head.branch:
+            raise ValueError("You cannot delete the currently checked out branch.")
+        flag = "-D" if force else "-d"
+        title_prefix = "Force delete" if force else "Delete"
+        explanation = (
+            f"Force delete the local branch label `{branch.name}`, even if Git does not consider it fully merged."
+            if force
+            else f"Delete the local branch label `{branch.name}`. Git will refuse if the branch is not fully merged."
+        )
+        warnings = [
+            "FORCE DELETE: this removes the local branch label even when it contains unmerged work.",
+            "The commits may become hard to find if no other ref points to them.",
+            "This does not delete any remote branch.",
+        ] if force else [
+            "This deletes a branch label from your local repository.",
+            "Git may refuse if the branch contains unmerged work; choose force delete only if that is intentional.",
+        ]
+        return CommandPlan(
+            title=f"{title_prefix} local branch {branch.name}",
+            explanation=explanation,
+            steps=[CommandStep(["git", "branch", flag, branch.name], "Delete the selected local branch label.")],
+            expected_effects=[
+                f"The local branch label `{branch.name}` is removed.",
+                "The commits remain in the repository if another ref or reflog still reaches them.",
+            ],
+            preview_steps=[
+                f"Remove the local branch label `{branch.name}`.",
+                "Do not contact any remote.",
+                "Do not delete working tree files.",
+            ],
+            graph_preview=_delete_branch_graph_preview(branch.name, remote=False),
+            warnings=warnings,
+            destructive=True,
+            state_fingerprint=state_fingerprint(state),
+        )
+
+    def delete_remote_branch(self, state: RepositoryState, branch: Reference) -> CommandPlan:
+        if branch.kind != "remote_tracking":
+            raise ValueError("Drag a remote-tracking branch to the trash.")
+        if "/" not in branch.name:
+            raise ValueError("Remote-tracking branch must include a remote name.")
+        remote, remote_branch = branch.name.split("/", 1)
+        if remote_branch == "HEAD":
+            raise ValueError("Remote HEAD is a symbolic pointer and cannot be deleted as a branch.")
+        return CommandPlan(
+            title=f"DANGEROUS: Delete remote branch {branch.name}",
+            explanation=(
+                f"Ask remote `{remote}` to delete branch `{remote_branch}`. This affects the shared remote repository, "
+                "not just your local cached remote-tracking label."
+            ),
+            steps=[
+                CommandStep(["git", "push", remote, "--delete", remote_branch], "Delete the branch on the remote repository."),
+                CommandStep(["git", "fetch", remote, "--prune"], "Refresh local remote-tracking refs after deletion."),
+            ],
+            expected_effects=[
+                f"The remote branch `{remote}:{remote_branch}` is deleted if the remote accepts the request.",
+                f"The local cached label `{branch.name}` disappears after pruning.",
+            ],
+            preview_steps=[
+                f"Send a delete request to remote `{remote}` for branch `{remote_branch}`.",
+                f"Prune the cached remote-tracking label `{branch.name}`.",
+                "Local branches are not deleted by this plan.",
+            ],
+            graph_preview=_delete_branch_graph_preview(branch.name, remote=True),
+            warnings=[
+                "DANGEROUS REMOTE OPERATION: this can delete a branch for everyone using that remote.",
+                "This is not the same as deleting a local branch label.",
+                "Make sure no one still needs the remote branch before executing.",
+            ],
+            destructive=True,
+            remote_impact=f"Deletes `{remote_branch}` on `{remote}`.",
+            state_fingerprint=state_fingerprint(state),
+        )
+
     def integrate_remote_tracking(
         self,
         state: RepositoryState,
@@ -706,6 +783,18 @@ def _push_graph_preview(local_branch: str, remote_ref: str) -> list[str]:
         "After:",
         f"  o---A---B  {local_branch}, {remote_ref}",
         "          ^ highlighted: remote branch catches up to local branch",
+    ]
+
+
+def _delete_branch_graph_preview(branch: str, *, remote: bool) -> list[str]:
+    scope = "remote branch" if remote else "local branch label"
+    return [
+        "Before:",
+        f"  o---A---B  {branch}",
+        "",
+        "After:",
+        "  o---A---B",
+        f"          xxx highlighted: deleted {scope} `{branch}`",
     ]
 
 

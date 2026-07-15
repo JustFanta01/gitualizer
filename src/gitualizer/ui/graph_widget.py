@@ -25,6 +25,7 @@ class CommitGraphWidget(QWidget):
     stageDroppedOnBranch = Signal(object)
     commitDroppedOnCommit = Signal(object, object)
     commitDroppedToTrash = Signal(object)
+    referenceDroppedToTrash = Signal(object)
     commitContextRequested = Signal(object, object)
     referenceContextRequested = Signal(object, object)
 
@@ -43,6 +44,10 @@ class CommitGraphWidget(QWidget):
         self._external_stage_drag = False
         self._mode = "commits"
         self._trash_rect = QRectF()
+        self._viewport_x = 0
+        self._viewport_y = 0
+        self._viewport_width = 420
+        self._viewport_height = 340
         self._row_spacing = 52
         self._lane_spacing = 72
         self.setMinimumSize(420, 340)
@@ -68,6 +73,13 @@ class CommitGraphWidget(QWidget):
             self.setMinimumWidth(760)
         elif mode == "branches":
             self.setMinimumWidth(680)
+        self.update()
+
+    def set_viewport(self, x: int, y: int, width: int, height: int) -> None:
+        self._viewport_x = max(0, x)
+        self._viewport_y = max(0, y)
+        self._viewport_width = max(1, width)
+        self._viewport_height = max(1, height)
         self.update()
 
     def _layout_nodes(self, state: Optional[RepositoryState]) -> dict[str, CommitNode]:
@@ -111,19 +123,21 @@ class CommitGraphWidget(QWidget):
             return
         if self._mode == "branches":
             self._draw_branch_overview(painter, include_remote_columns=False)
+            self._draw_trash(painter)
             self._draw_drag(painter)
             return
         if self._mode == "local_remote":
             self._draw_branch_overview(painter, include_remote_columns=True)
+            self._draw_trash(painter)
             self._draw_drag(painter)
             return
-        self._draw_git_flow(painter)
         if not self._state.commits:
             self._draw_empty(painter, "Repository has no commits yet.")
             return
         self._draw_preview(painter)
         self._draw_edges(painter)
         self._draw_commits(painter)
+        self._draw_git_flow(painter)
         self._draw_trash(painter)
         self._draw_drag(painter)
 
@@ -224,10 +238,13 @@ class CommitGraphWidget(QWidget):
             ("Staging Area / Index", f"{staged} staged", QColor("#b45309")),
             ("HEAD", head, QColor("#1f6feb")),
         ]
-        x = 24.0
-        y = 22.0
+        x = float(self._viewport_x + 24)
+        y = float(self._viewport_y + 22)
         width = 136.0
         height = 50.0
+        painter.setPen(QPen(Qt.PenStyle.NoPen))
+        painter.setBrush(QColor("#ffffff"))
+        painter.drawRect(QRectF(self._viewport_x, self._viewport_y, self._viewport_width, 86))
         for index, (title, subtitle, color) in enumerate(flow):
             rect = QRectF(x, y, width, height)
             active = self._preview_targets_flow(title)
@@ -389,7 +406,7 @@ class CommitGraphWidget(QWidget):
         painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
 
     def _draw_trash(self, painter: QPainter) -> None:
-        if self._drag_commit is None:
+        if self._drag_commit is None and not self._is_deletable_drag_ref():
             self._trash_rect = QRectF()
             return
         self._trash_rect = self._trash_drop_rect()
@@ -404,7 +421,9 @@ class CommitGraphWidget(QWidget):
     def _trash_drop_rect(self) -> QRectF:
         size = 44.0
         margin = 18.0
-        return QRectF(self.width() - size - margin, margin, size, size)
+        x = min(float(self.width()) - size - margin, float(self._viewport_x + self._viewport_width) - size - margin)
+        y = float(self._viewport_y) + margin
+        return QRectF(max(margin, x), y, size, size)
 
     def _is_possible_ref_drop(self, ref: Reference) -> bool:
         if self._external_stage_drag:
@@ -428,6 +447,9 @@ class CommitGraphWidget(QWidget):
         if self._drag_commit is not None:
             return commit.oid != self._drag_commit.oid
         return False
+
+    def _is_deletable_drag_ref(self) -> bool:
+        return self._drag_ref is not None and self._drag_ref.kind in {"local_branch", "remote_tracking"}
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
         if event.button() != Qt.MouseButton.LeftButton:
@@ -478,11 +500,15 @@ class CommitGraphWidget(QWidget):
         self._hover_commit = None
         self.update()
         if source_ref is not None:
-            target = self._reference_at(event.position().toPoint())
+            release_pos = event.position().toPoint()
+            if source_ref.kind in {"local_branch", "remote_tracking"} and self._trash_drop_rect().contains(release_pos):
+                self.referenceDroppedToTrash.emit(source_ref)
+                return
+            target = self._reference_at(release_pos)
             if target is not None and target.name != source_ref.name:
                 self.referenceDropped.emit(source_ref, target)
                 return
-            target_commit = self._commit_at(event.position().toPoint())
+            target_commit = self._commit_at(release_pos)
             if target_commit is not None:
                 self.referenceDroppedOnCommit.emit(source_ref, target_commit)
                 return
