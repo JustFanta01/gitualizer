@@ -111,6 +111,30 @@ class OperationPlanner:
             state_fingerprint=state_fingerprint(state),
         )
 
+    def commit_to_branch(self, state: RepositoryState, branch: str, message: str) -> CommandPlan:
+        branch = branch.strip()
+        message = message.strip()
+        if not branch:
+            raise ValueError("Drop the staging area onto a local branch.")
+        if not message:
+            raise ValueError("Enter a commit message.")
+        if not state.staged_changes:
+            raise ValueError("There are no staged changes to commit.")
+        steps: list[CommandStep] = []
+        if state.head.branch != branch:
+            steps.append(CommandStep(["git", "switch", branch], f"Make `{branch}` the current branch."))
+        steps.append(CommandStep(["git", "commit", "-m", message], "Create a commit from the current staging area."))
+        return CommandPlan(
+            title=f"Commit staged changes to {branch}",
+            explanation=f"Create a new commit on `{branch}` from the current staging area.",
+            steps=steps,
+            expected_effects=[
+                "A new commit node will be created from the index.",
+                f"`{branch}` will move to the new commit.",
+            ],
+            state_fingerprint=state_fingerprint(state),
+        )
+
     def fetch(self, state: RepositoryState, remote: str) -> CommandPlan:
         remote = remote.strip()
         if not remote:

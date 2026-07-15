@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -23,7 +24,6 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSplitter,
-    QTableWidget,
     QTableWidgetItem,
     QTextBrowser,
     QTextEdit,
@@ -37,6 +37,7 @@ from gitualizer.model.repository_state import FileChange, Reference, RepositoryS
 from gitualizer.operations.command_plan import CommandPlan, ExecutionResult
 from gitualizer.operations.executor import CommandExecutor
 from gitualizer.operations.planner import OperationPlanner, state_fingerprint
+from gitualizer.ui.file_status_widget import FileStatusWidget
 from gitualizer.ui.graph_widget import CommitGraphWidget
 
 
@@ -71,7 +72,7 @@ class MainWindow(QMainWindow):
         graph_scroll.setWidget(self.graph)
         graph_scroll.setObjectName("graphScroll")
 
-        self.status_table = self._table(["Area", "Code", "Path"])
+        self.file_status = FileStatusWidget()
         self.refs_table = self._table(["Kind", "Name", "Target", "Upstream", "Ahead/Behind"])
         self.remotes_table = self._table(["Remote", "Fetch URL", "Push URL"])
         self.summary = QLabel("No repository loaded.")
@@ -83,7 +84,7 @@ class MainWindow(QMainWindow):
         self.command_panel.setMinimumHeight(115)
         self.command_panel.setHtml(_empty_preview_html())
 
-        self.working_panel = self._panel("Working Tree and Index", self.status_table)
+        self.working_panel = self._panel("Working Tree and Index", self.file_status)
 
         self.repo_panel = self._panel("Repository State", self.summary)
         self.refs_panel = self._panel("References", self.refs_table)
@@ -120,6 +121,8 @@ class MainWindow(QMainWindow):
         self.refresh_button.clicked.connect(self.refresh)
         self.path_edit.returnPressed.connect(self.refresh)
         self.graph.referenceDropped.connect(self._handle_reference_drop)
+        self.graph.stageDroppedOnBranch.connect(self._handle_stage_drop_on_branch)
+        self.file_status.changesDroppedToStage.connect(self._handle_changes_drop_to_stage)
 
         self.refresh_timer = QTimer(self)
         self.refresh_timer.setInterval(2500)
@@ -163,7 +166,9 @@ class MainWindow(QMainWindow):
         help_menu = self.menuBar().addMenu("Help")
         help_menu.addAction("About Gitualizer", self._about)
 
-    def _table(self, headers: list[str]) -> QTableWidget:
+    def _table(self, headers: list[str]):
+        from PySide6.QtWidgets import QTableWidget
+
         table = QTableWidget(0, len(headers))
         table.setHorizontalHeaderLabels(headers)
         table.setAlternatingRowColors(True)
@@ -243,17 +248,7 @@ class MainWindow(QMainWindow):
         )
 
     def _set_changes(self, changes: list[FileChange]) -> None:
-        self.status_table.setRowCount(len(changes))
-        for row, change in enumerate(changes):
-            self.status_table.setItem(row, 0, QTableWidgetItem(change.area))
-            self.status_table.setItem(row, 1, QTableWidgetItem(change.code))
-            path = change.path if change.original_path is None else f"{change.original_path} -> {change.path}"
-            self.status_table.setItem(row, 2, QTableWidgetItem(path))
-            for column in range(3):
-                item = self.status_table.item(row, column)
-                if item is not None:
-                    item.setData(Qt.ItemDataRole.UserRole, change)
-        self.status_table.resizeColumnsToContents()
+        self.file_status.set_changes(changes)
 
     def _set_refs(self, refs: list[Reference]) -> None:
         self.refs_table.setRowCount(len(refs))
@@ -329,6 +324,39 @@ class MainWindow(QMainWindow):
         if dialog.exec() != QDialog.DialogCode.Accepted or dialog.selected_plan is None:
             return
         plan = dialog.selected_plan
+        self.graph.set_preview_plan(plan)
+        self.command_panel.setHtml(_render_plan_html(plan, details_open=False))
+        confirm = CommandPlanDialog(plan, self)
+        if confirm.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._execute_plan(plan)
+
+    def _handle_changes_drop_to_stage(self, changes: list[FileChange]) -> None:
+        if self.state is None:
+            return
+        try:
+            plan = self.planner.stage_paths(self.state, changes)
+        except ValueError as exc:
+            QMessageBox.information(self, "Operation Not Available", str(exc))
+            return
+        self.graph.set_preview_plan(plan)
+        self.command_panel.setHtml(_render_plan_html(plan, details_open=False))
+        confirm = CommandPlanDialog(plan, self)
+        if confirm.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._execute_plan(plan)
+
+    def _handle_stage_drop_on_branch(self, branch: Reference) -> None:
+        if self.state is None:
+            return
+        message, accepted = QInputDialog.getText(self, "Commit Message", f"Commit staged changes to `{branch.name}`:")
+        if not accepted:
+            return
+        try:
+            plan = self.planner.commit_to_branch(self.state, branch.name, message)
+        except ValueError as exc:
+            QMessageBox.information(self, "Operation Not Available", str(exc))
+            return
         self.graph.set_preview_plan(plan)
         self.command_panel.setHtml(_render_plan_html(plan, details_open=False))
         confirm = CommandPlanDialog(plan, self)

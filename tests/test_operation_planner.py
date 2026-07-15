@@ -96,3 +96,10 @@ def test_drag_local_branch_onto_local_branch_can_merge() -> None:
 
     assert plan.steps[0].args == ["git", "switch", "main"]
     assert plan.steps[1].args == ["git", "merge", "feature"]
+
+
+def test_drag_staging_area_onto_branch_creates_commit_plan() -> None:
+    plan = OperationPlanner().commit_to_branch(state(), "feature", "Save staged work")
+
+    assert plan.steps[0].args == ["git", "switch", "feature"]
+    assert plan.steps[1].args == ["git", "commit", "-m", "Save staged work"]

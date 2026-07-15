@@ -20,6 +20,7 @@ class CommitNode:
 
 class CommitGraphWidget(QWidget):
     referenceDropped = Signal(object, object)
+    stageDroppedOnBranch = Signal(object)
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -33,6 +34,7 @@ class CommitGraphWidget(QWidget):
         self._lane_spacing = 88
         self.setMinimumSize(420, 340)
         self.setMouseTracking(True)
+        self.setAcceptDrops(True)
 
     def set_state(self, state: Optional[RepositoryState]) -> None:
         self._state = state
@@ -299,3 +301,26 @@ class CommitGraphWidget(QWidget):
             if rect.contains(pos):
                 return ref
         return None
+
+    def dragEnterEvent(self, event) -> None:  # noqa: N802
+        if event.mimeData().hasFormat("application/x-gitualizer-stage"):
+            event.acceptProposedAction()
+            return
+        event.ignore()
+
+    def dragMoveEvent(self, event) -> None:  # noqa: N802
+        if event.mimeData().hasFormat("application/x-gitualizer-stage"):
+            event.acceptProposedAction()
+            return
+        event.ignore()
+
+    def dropEvent(self, event) -> None:  # noqa: N802
+        if not event.mimeData().hasFormat("application/x-gitualizer-stage"):
+            event.ignore()
+            return
+        target = self._reference_at(event.position().toPoint())
+        if target is None or target.kind != "local_branch":
+            event.ignore()
+            return
+        self.stageDroppedOnBranch.emit(target)
+        event.acceptProposedAction()
