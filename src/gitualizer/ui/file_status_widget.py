@@ -16,6 +16,8 @@ STAGE_MIME = "application/x-gitualizer-stage"
 
 class ChangeListWidget(QListWidget):
     changesDropped = Signal(object)
+    dragStarted = Signal(str)
+    dragEnded = Signal()
 
     def __init__(self, area: str, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -45,6 +47,7 @@ class ChangeListWidget(QListWidget):
             changes = self.changes()
         if not changes:
             return
+        self.dragStarted.emit(self.area)
         drag = QDrag(self)
         mime = QMimeData()
         payload = json.dumps([_change_payload(change) for change in changes]).encode("utf-8")
@@ -53,6 +56,7 @@ class ChangeListWidget(QListWidget):
             mime.setData(STAGE_MIME, QByteArray(b"1"))
         drag.setMimeData(mime)
         drag.exec(Qt.DropAction.MoveAction)
+        self.dragEnded.emit()
 
     def dragEnterEvent(self, event) -> None:  # noqa: N802
         if event.mimeData().hasFormat(CHANGE_MIME):
@@ -85,28 +89,48 @@ class ChangeListWidget(QListWidget):
         self.style().unpolish(self)
         self.style().polish(self)
 
+    def set_drop_hint(self, active: bool) -> None:
+        self._set_drop_active(active)
+
 
 class FileStatusWidget(QWidget):
     changesDroppedToStage = Signal(object)
     changesDroppedToWorking = Signal(object)
     changesDroppedToTrash = Signal(object)
+    changeActivated = Signal(object)
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.working_list = ChangeListWidget("working")
         self.staged_list = ChangeListWidget("staged")
-        self.trash_zone = DropZone("Trash")
+        self.trash_zone = DropZone("[X]")
+        self.trash_zone.setToolTip("Discard selected changes")
         self.staged_list.setAcceptDrops(True)
         self.staged_list.changesDropped.connect(lambda changes: self.changesDroppedToStage.emit(changes))
         self.working_list.changesDropped.connect(lambda changes: self.changesDroppedToWorking.emit(changes))
         self.trash_zone.changesDropped.connect(lambda changes: self.changesDroppedToTrash.emit(changes))
+        self.working_list.itemDoubleClicked.connect(self._activate_item)
+        self.staged_list.itemDoubleClicked.connect(self._activate_item)
+        self.working_list.dragStarted.connect(self._show_drag_targets)
+        self.staged_list.dragStarted.connect(self._show_drag_targets)
+        self.working_list.dragEnded.connect(self._clear_drag_targets)
+        self.staged_list.dragEnded.connect(self._clear_drag_targets)
 
-        layout = QHBoxLayout(self)
+        layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
-        layout.addWidget(self._column("Working Tree", self.working_list))
-        layout.addWidget(self._column("Staging Area / Index", self.staged_list))
-        layout.addWidget(self._column("Trash", self.trash_zone))
+        layout.setSpacing(6)
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.addWidget(QLabel("Working Tree and Index"))
+        header.addStretch(1)
+        header.addWidget(self.trash_zone)
+        lists = QHBoxLayout()
+        lists.setContentsMargins(0, 0, 0, 0)
+        lists.setSpacing(8)
+        lists.addWidget(self._column("Working Tree", self.working_list))
+        lists.addWidget(self._column("Staging Area / Index", self.staged_list))
+        layout.addLayout(header)
+        layout.addLayout(lists)
 
     def set_changes(self, changes: list[FileChange]) -> None:
         self.working_list.clear()
@@ -132,12 +156,29 @@ class FileStatusWidget(QWidget):
         return widget
 
     def _add_change(self, list_widget: QListWidget, change: FileChange) -> None:
-        label = f"{change.code}  {change.path}"
+        label = f"|||  {change.code}  {change.path}"
         if change.original_path:
-            label = f"{change.code}  {change.original_path} -> {change.path}"
+            label = f"|||  {change.code}  {change.original_path} -> {change.path}"
         item = QListWidgetItem(label)
         item.setData(Qt.ItemDataRole.UserRole, change)
         list_widget.addItem(item)
+
+    def _activate_item(self, item: QListWidgetItem) -> None:
+        change = item.data(Qt.ItemDataRole.UserRole)
+        if isinstance(change, FileChange):
+            self.changeActivated.emit(change)
+
+    def _show_drag_targets(self, area: str) -> None:
+        self.trash_zone.set_drop_active(True)
+        if area == "working":
+            self.staged_list.set_drop_hint(True)
+        elif area == "staged":
+            self.working_list.set_drop_hint(True)
+
+    def _clear_drag_targets(self) -> None:
+        self.trash_zone.set_drop_active(False)
+        self.working_list.set_drop_hint(False)
+        self.staged_list.set_drop_hint(False)
 
 
 class DropZone(QLabel):
@@ -148,7 +189,7 @@ class DropZone(QLabel):
         self.setObjectName("dropZone")
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setAcceptDrops(True)
-        self.setMinimumWidth(82)
+        self.setFixedSize(34, 28)
         self.setProperty("dropActive", False)
 
     def dragEnterEvent(self, event) -> None:  # noqa: N802
@@ -181,6 +222,9 @@ class DropZone(QLabel):
         self.setProperty("dropActive", active)
         self.style().unpolish(self)
         self.style().polish(self)
+
+    def set_drop_active(self, active: bool) -> None:
+        self._set_drop_active(active)
 
 
 def decode_changes(data: QByteArray) -> list[FileChange]:

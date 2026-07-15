@@ -39,8 +39,8 @@ class CommitGraphWidget(QWidget):
         self._hover_commit: Optional[Commit] = None
         self._external_stage_drag = False
         self._mode = "commits"
-        self._row_spacing = 64
-        self._lane_spacing = 88
+        self._row_spacing = 52
+        self._lane_spacing = 72
         self.setMinimumSize(420, 340)
         self.setMouseTracking(True)
         self.setAcceptDrops(True)
@@ -50,8 +50,8 @@ class CommitGraphWidget(QWidget):
         self._nodes = self._layout_nodes(state)
         row_count = max(len(self._nodes), 8)
         lane_count = max((int(node.x) for node in self._nodes.values()), default=1)
-        self.setMinimumHeight(92 + row_count * self._row_spacing)
-        self.setMinimumWidth(max(560, lane_count + 480))
+        self.setMinimumHeight(84 + row_count * self._row_spacing)
+        self.setMinimumWidth(max(500, lane_count + 420))
         self.update()
 
     def set_preview_plan(self, plan: Optional[CommandPlan]) -> None:
@@ -87,7 +87,7 @@ class CommitGraphWidget(QWidget):
             nodes[commit.oid] = CommitNode(
                 oid=commit.oid,
                 x=78 + lane * self._lane_spacing,
-                y=136 + index * self._row_spacing,
+                y=116 + index * self._row_spacing,
             )
         return nodes
 
@@ -129,10 +129,10 @@ class CommitGraphWidget(QWidget):
             columns = [("Branches and refs", refs, 48.0)]
         for title, refs, x in columns:
             painter.drawText(QRectF(x, 28, 260, 24), title)
-            y = 68.0
+            y = 60.0
             for ref in refs:
                 self._draw_branch_card(painter, ref, x, y, include_remote_columns)
-                y += 46
+                y += 38
         if self._state.commits_truncated:
             painter.setPen(QColor("#6b7280"))
             painter.setFont(QFont("Sans Serif", 8))
@@ -145,7 +145,7 @@ class CommitGraphWidget(QWidget):
             "tag": QColor("#bf8700"),
         }.get(ref.kind, QColor("#57606a"))
         width = 260.0
-        rect = QRectF(x, y, width, 34)
+        rect = QRectF(x, y, width, 30)
         self._ref_hitboxes.append((rect, ref))
         is_target = self._hover_ref is not None and self._hover_ref.full_name == ref.full_name
         is_possible = self._is_possible_ref_drop(ref)
@@ -154,26 +154,26 @@ class CommitGraphWidget(QWidget):
         painter.drawRoundedRect(rect, 7, 7)
         painter.setPen(color)
         painter.setFont(QFont("Sans Serif", 9, QFont.Weight.Bold))
-        painter.drawText(rect.adjusted(10, 3, -54, -3), Qt.AlignmentFlag.AlignVCenter, ref.name)
+        painter.drawText(rect.adjusted(8, 3, -54, -3), Qt.AlignmentFlag.AlignVCenter, f"||| {ref.name}")
         painter.setFont(QFont("Sans Serif", 8))
         painter.setPen(QColor("#52616f"))
         meta = ref.target[:12]
         if ref.upstream:
             meta = f"{meta}  -> {ref.upstream}"
-        painter.drawText(rect.adjusted(10, 17, -10, 0), meta)
+        painter.drawText(rect.adjusted(8, 15, -10, 0), meta)
         if ref.behind and ref.behind > 0:
             painter.setBrush(QColor("#2da44e"))
             painter.setPen(QPen(QColor("#ffffff"), 1))
-            painter.drawEllipse(QPointF(x + width - 22, y + 17), 9, 9)
+            painter.drawEllipse(QPointF(x + width - 22, y + 15), 8, 8)
             painter.setPen(QColor("#ffffff"))
             painter.setFont(QFont("Sans Serif", 7, QFont.Weight.Bold))
-            painter.drawText(QRectF(x + width - 31, y + 8, 18, 18), Qt.AlignmentFlag.AlignCenter, str(ref.behind))
+            painter.drawText(QRectF(x + width - 30, y + 7, 16, 16), Qt.AlignmentFlag.AlignCenter, str(ref.behind))
         if include_remote_columns and ref.ahead and ref.ahead > 0:
             painter.setBrush(QColor("#d1242f"))
             painter.setPen(QPen(QColor("#ffffff"), 1))
-            painter.drawEllipse(QPointF(x + width - 44, y + 17), 9, 9)
+            painter.drawEllipse(QPointF(x + width - 44, y + 15), 8, 8)
             painter.setPen(QColor("#ffffff"))
-            painter.drawText(QRectF(x + width - 53, y + 8, 18, 18), Qt.AlignmentFlag.AlignCenter, str(ref.ahead))
+            painter.drawText(QRectF(x + width - 52, y + 7, 16, 16), Qt.AlignmentFlag.AlignCenter, str(ref.ahead))
 
     def _draw_empty(self, painter: QPainter, text: str) -> None:
         painter.setPen(QColor("#666a73"))
@@ -192,8 +192,8 @@ class CommitGraphWidget(QWidget):
         ]
         x = 24.0
         y = 22.0
-        width = 150.0
-        height = 58.0
+        width = 136.0
+        height = 50.0
         for index, (title, subtitle, color) in enumerate(flow):
             rect = QRectF(x, y, width, height)
             active = self._preview_targets_flow(title)
@@ -202,10 +202,10 @@ class CommitGraphWidget(QWidget):
             painter.drawRoundedRect(rect, 8, 8)
             painter.setPen(QColor("#1f2933"))
             painter.setFont(QFont("Sans Serif", 8, QFont.Weight.Bold))
-            painter.drawText(rect.adjusted(10, 9, -10, -30), Qt.AlignmentFlag.AlignLeft, title)
+            painter.drawText(rect.adjusted(8, 7, -8, -27), Qt.AlignmentFlag.AlignLeft, title)
             painter.setFont(QFont("Sans Serif", 8))
             painter.setPen(QColor("#52616f"))
-            painter.drawText(rect.adjusted(10, 30, -10, -8), Qt.AlignmentFlag.AlignLeft, subtitle)
+            painter.drawText(rect.adjusted(8, 26, -8, -7), Qt.AlignmentFlag.AlignLeft, subtitle)
             if index < len(flow) - 1:
                 painter.setPen(QPen(QColor("#9aa7b4"), 2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
                 start = QPointF(x + width + 6, y + height / 2)
@@ -213,7 +213,7 @@ class CommitGraphWidget(QWidget):
                 painter.drawLine(start, end)
                 painter.drawLine(end, QPointF(end.x() - 8, end.y() - 6))
                 painter.drawLine(end, QPointF(end.x() - 8, end.y() + 6))
-            x += width + 46
+            x += width + 40
 
     def _preview_targets_flow(self, title: str) -> bool:
         if self._preview_plan is None:
@@ -231,7 +231,7 @@ class CommitGraphWidget(QWidget):
         painter.setPen(QPen(QColor("#edf2f7"), 1))
         x = 78
         while x < self.width():
-            painter.drawLine(QPointF(x, 104), QPointF(x, self.height()))
+            painter.drawLine(QPointF(x, 90), QPointF(x, self.height()))
             x += self._lane_spacing
 
     def _draw_preview(self, painter: QPainter) -> None:
@@ -304,15 +304,15 @@ class CommitGraphWidget(QWidget):
             painter.setPen(QColor("#20242a"))
             painter.setFont(QFont("Sans Serif", 8))
             label = f"{commit.short_oid}  {commit.subject}"
-            painter.drawText(QRectF(node.x + 22, node.y - 14, max(260, self.width() - node.x - 44), 22), label)
+            painter.drawText(QRectF(node.x + 18, node.y - 12, max(240, self.width() - node.x - 38), 20), label)
 
             refs = refs_by_target.get(commit.oid, [])
-            self._draw_refs(painter, refs, node.x + 22, node.y + 12)
+            self._draw_refs(painter, refs, node.x + 18, node.y + 10)
 
     def _draw_refs(self, painter: QPainter, refs: list[Reference], x: float, y: float) -> None:
         offset = 0.0
         for ref in sorted(refs, key=lambda item: item.name):
-            text = ref.name
+            text = f"||| {ref.name}" if ref.kind != "head" else ref.name
             color = {
                 "head": QColor("#d1242f"),
                 "local_branch": QColor("#1a7f37"),
@@ -321,7 +321,7 @@ class CommitGraphWidget(QWidget):
             }.get(ref.kind, QColor("#57606a"))
             painter.setFont(QFont("Sans Serif", 8))
             width = painter.fontMetrics().horizontalAdvance(text) + 14
-            rect = QRectF(x + offset, y, width, 22)
+            rect = QRectF(x + offset, y, width, 20)
             if ref.kind != "head":
                 self._ref_hitboxes.append((rect, ref))
             is_target = self._hover_ref is not None and self._hover_ref.full_name == ref.full_name

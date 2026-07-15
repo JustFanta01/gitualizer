@@ -107,7 +107,8 @@ class MainWindow(QMainWindow):
         self.main_splitter.addWidget(self.graph_scroll)
         self.main_splitter.addWidget(self.right_panel)
         self.main_splitter.setChildrenCollapsible(False)
-        self.main_splitter.setSizes([240, 520, 260])
+        self.right_panel.setMinimumWidth(320)
+        self.main_splitter.setSizes([220, 700, 360])
 
         self.command_panel_group = self._panel("Operation / Preview / Commands", self.command_panel)
 
@@ -132,6 +133,7 @@ class MainWindow(QMainWindow):
         self.file_status.changesDroppedToStage.connect(self._handle_changes_drop_to_stage)
         self.file_status.changesDroppedToWorking.connect(self._handle_changes_drop_to_working)
         self.file_status.changesDroppedToTrash.connect(self._handle_changes_drop_to_trash)
+        self.file_status.changeActivated.connect(self._show_file_diff)
 
         self.refresh_timer = QTimer(self)
         self.refresh_timer.setInterval(2500)
@@ -200,6 +202,7 @@ class MainWindow(QMainWindow):
         table.verticalHeader().setDefaultSectionSize(24)
         table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         table.horizontalHeader().setStretchLastSection(True)
+        table.setWordWrap(False)
         return table
 
     def _panel(self, title: str, child: QWidget) -> QWidget:
@@ -306,6 +309,10 @@ class MainWindow(QMainWindow):
             self.refs_table.setItem(row, 3, QTableWidgetItem(ref.upstream or ""))
             self.refs_table.setItem(row, 4, QTableWidgetItem(ahead_behind))
         self.refs_table.resizeColumnsToContents()
+        self.refs_table.setColumnWidth(0, 110)
+        self.refs_table.setColumnWidth(1, 150)
+        self.refs_table.setColumnWidth(2, 96)
+        self.refs_table.setColumnWidth(3, 140)
 
     def _set_remotes(self, state: Optional[RepositoryState]) -> None:
         remotes = state.remotes if state else []
@@ -315,6 +322,8 @@ class MainWindow(QMainWindow):
             self.remotes_table.setItem(row, 1, QTableWidgetItem(remote.fetch_url or ""))
             self.remotes_table.setItem(row, 2, QTableWidgetItem(remote.push_url or ""))
         self.remotes_table.resizeColumnsToContents()
+        self.remotes_table.setColumnWidth(0, 80)
+        self.remotes_table.setColumnWidth(1, 220)
 
     def _execute_plan(self, plan: CommandPlan) -> None:
         assert self.state is not None
@@ -442,6 +451,31 @@ class MainWindow(QMainWindow):
             return
         self._execute_plan(plan)
 
+    def _show_file_diff(self, change: FileChange) -> None:
+        if self.state is None:
+            return
+        if change.area == "staged":
+            args = ["diff", "--cached", "--", change.path]
+        elif change.area == "untracked":
+            args = ["diff", "--no-index", "--", "/dev/null", change.path]
+        else:
+            args = ["diff", "--", change.path]
+        result = self.reader.runner.run(args, cwd=self.state.path, check=False)
+        text = result.stdout or result.stderr or "No diff output."
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Diff: {change.path}")
+        dialog.resize(860, 620)
+        layout = QVBoxLayout(dialog)
+        viewer = QTextEdit()
+        viewer.setReadOnly(True)
+        viewer.setPlainText(text)
+        layout.addWidget(viewer)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(dialog.reject)
+        buttons.accepted.connect(dialog.accept)
+        layout.addWidget(buttons)
+        dialog.exec()
+
     def _handle_commit_drop_on_commit(self, source: Commit, target: Commit) -> None:
         if self.state is None:
             return
@@ -514,7 +548,7 @@ class MainWindow(QMainWindow):
         self.graph_scroll.show()
         self.right_panel.show()
         self.command_panel_group.show()
-        self.main_splitter.setSizes([240, 520, 260])
+        self.main_splitter.setSizes([220, 700, 360])
 
     def _graph_focus_mode(self) -> None:
         self.working_panel.hide()
