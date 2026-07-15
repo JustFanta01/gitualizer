@@ -8,6 +8,7 @@ from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QWidget
 
 from gitualizer.model.repository_state import Commit, Reference, RepositoryState
+from gitualizer.operations.command_plan import CommandPlan
 
 
 @dataclass(frozen=True)
@@ -21,9 +22,10 @@ class CommitGraphWidget(QWidget):
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self._state: Optional[RepositoryState] = None
+        self._preview_plan: Optional[CommandPlan] = None
         self._nodes: dict[str, CommitNode] = {}
-        self._row_spacing = 72
-        self._lane_spacing = 96
+        self._row_spacing = 78
+        self._lane_spacing = 104
         self.setMinimumSize(520, 420)
 
     def set_state(self, state: Optional[RepositoryState]) -> None:
@@ -35,13 +37,9 @@ class CommitGraphWidget(QWidget):
         self.setMinimumWidth(max(560, lane_count + 480))
         self.update()
 
-    def set_row_spacing(self, value: int) -> None:
-        self._row_spacing = value
-        self.set_state(self._state)
-
-    def set_lane_spacing(self, value: int) -> None:
-        self._lane_spacing = value
-        self.set_state(self._state)
+    def set_preview_plan(self, plan: Optional[CommandPlan]) -> None:
+        self._preview_plan = plan
+        self.update()
 
     def _layout_nodes(self, state: Optional[RepositoryState]) -> dict[str, CommitNode]:
         if state is None:
@@ -68,7 +66,7 @@ class CommitGraphWidget(QWidget):
             nodes[commit.oid] = CommitNode(
                 oid=commit.oid,
                 x=78 + lane * self._lane_spacing,
-                y=62 + index * self._row_spacing,
+                y=176 + index * self._row_spacing,
             )
         return nodes
 
@@ -80,9 +78,11 @@ class CommitGraphWidget(QWidget):
         if self._state is None:
             self._draw_empty(painter, "Open a Git repository to inspect it.")
             return
+        self._draw_git_flow(painter)
         if not self._state.commits:
             self._draw_empty(painter, "Repository has no commits yet.")
             return
+        self._draw_preview(painter)
         self._draw_edges(painter)
         self._draw_commits(painter)
 
@@ -91,12 +91,78 @@ class CommitGraphWidget(QWidget):
         painter.setFont(QFont("Sans Serif", 12))
         painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, text)
 
+    def _draw_git_flow(self, painter: QPainter) -> None:
+        assert self._state is not None
+        staged = len(self._state.staged_changes)
+        working = len(self._state.working_tree_changes) + len(self._state.untracked_changes)
+        head = self._state.head.short_oid or "unborn"
+        flow = [
+            ("Working Tree", f"{working} changed", QColor("#0f766e")),
+            ("Staging Area / Index", f"{staged} staged", QColor("#b45309")),
+            ("HEAD", head, QColor("#1f6feb")),
+        ]
+        x = 34.0
+        y = 28.0
+        width = 190.0
+        height = 74.0
+        for index, (title, subtitle, color) in enumerate(flow):
+            rect = QRectF(x, y, width, height)
+            active = self._preview_targets_flow(title)
+            painter.setPen(QPen(color if active else QColor("#d0d7de"), 2))
+            painter.setBrush(QColor(color.red(), color.green(), color.blue(), 22 if active else 10))
+            painter.drawRoundedRect(rect, 8, 8)
+            painter.setPen(QColor("#1f2933"))
+            painter.setFont(QFont("Sans Serif", 10, QFont.Weight.Bold))
+            painter.drawText(rect.adjusted(14, 12, -14, -36), Qt.AlignmentFlag.AlignLeft, title)
+            painter.setFont(QFont("Sans Serif", 9))
+            painter.setPen(QColor("#52616f"))
+            painter.drawText(rect.adjusted(14, 38, -14, -10), Qt.AlignmentFlag.AlignLeft, subtitle)
+            if index < len(flow) - 1:
+                painter.setPen(QPen(QColor("#9aa7b4"), 2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+                start = QPointF(x + width + 8, y + height / 2)
+                end = QPointF(x + width + 56, y + height / 2)
+                painter.drawLine(start, end)
+                painter.drawLine(end, QPointF(end.x() - 8, end.y() - 6))
+                painter.drawLine(end, QPointF(end.x() - 8, end.y() + 6))
+            x += width + 64
+
+    def _preview_targets_flow(self, title: str) -> bool:
+        if self._preview_plan is None:
+            return False
+        command_text = self._preview_plan.commands_text
+        if title.startswith("Working"):
+            return "git add" in command_text or "git restore --staged" in command_text
+        if title.startswith("Staging"):
+            return "git add" in command_text or "git restore --staged" in command_text or "git commit" in command_text
+        if title == "HEAD":
+            return "git commit" in command_text or "git switch" in command_text or "git merge --ff-only" in command_text
+        return False
+
     def _draw_grid(self, painter: QPainter) -> None:
         painter.setPen(QPen(QColor("#edf2f7"), 1))
         x = 78
         while x < self.width():
-            painter.drawLine(QPointF(x, 0), QPointF(x, self.height()))
+            painter.drawLine(QPointF(x, 148), QPointF(x, self.height()))
             x += self._lane_spacing
+
+    def _draw_preview(self, painter: QPainter) -> None:
+        if self._preview_plan is None or self._state is None:
+            return
+        command_text = self._preview_plan.commands_text
+        if "git commit" not in command_text or not self._state.head.oid:
+            return
+        head_node = self._nodes.get(self._state.head.oid)
+        if head_node is None:
+            return
+        ghost = QPointF(head_node.x, head_node.y - 58)
+        painter.setPen(QPen(QColor("#1f6feb"), 2, Qt.PenStyle.DashLine, Qt.PenCapStyle.RoundCap))
+        painter.drawLine(ghost, QPointF(head_node.x, head_node.y - 12))
+        painter.setBrush(QColor(31, 111, 235, 32))
+        painter.setPen(QPen(QColor("#1f6feb"), 2, Qt.PenStyle.DashLine))
+        painter.drawEllipse(ghost, 11, 11)
+        painter.setPen(QColor("#1f6feb"))
+        painter.setFont(QFont("Sans Serif", 9, QFont.Weight.Bold))
+        painter.drawText(QRectF(ghost.x() + 20, ghost.y() - 12, 320, 24), "preview: new commit from index")
 
     def _draw_edges(self, painter: QPainter) -> None:
         assert self._state is not None

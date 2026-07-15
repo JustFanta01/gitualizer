@@ -20,7 +20,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     app = QApplication(sys.argv[:1])
     window = MainWindow(args.repository)
-    window.show()
+    window.showMaximized()
     return app.exec()
 
 

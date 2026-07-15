@@ -1,15 +1,17 @@
 from __future__ import annotations
 
+import html
 from pathlib import Path
 from typing import Callable, Optional
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QTimer, Qt
+from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
+    QApplication,
     QComboBox,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
-    QFormLayout,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -20,10 +22,10 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
-    QSlider,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
+    QTextBrowser,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -45,6 +47,9 @@ class MainWindow(QMainWindow):
         self.planner = OperationPlanner()
         self.executor = CommandExecutor()
         self.state: Optional[RepositoryState] = None
+        self.child_windows: list[QMainWindow] = []
+        self.auto_refresh_enabled = True
+        self.refresh_in_progress = False
         self.setWindowTitle("Gitualizer")
         self.resize(1320, 840)
         self.setStyleSheet(APP_STYLE)
@@ -73,10 +78,10 @@ class MainWindow(QMainWindow):
         self.summary.setWordWrap(True)
         self.summary.setObjectName("summary")
 
-        self.command_panel = QTextEdit()
-        self.command_panel.setReadOnly(True)
-        self.command_panel.setMinimumHeight(130)
-        self.command_panel.setPlainText("Select a V1 operation. Commands will appear here before execution.")
+        self.command_panel = QTextBrowser()
+        self.command_panel.setOpenExternalLinks(False)
+        self.command_panel.setMinimumHeight(150)
+        self.command_panel.setHtml(_empty_preview_html())
 
         self.branch_combo = QComboBox()
         self.branch_name = QLineEdit()
@@ -96,41 +101,31 @@ class MainWindow(QMainWindow):
         self.ff_button = QPushButton("Fast-forward")
         self.push_button = QPushButton("Push")
 
-        self.row_spacing = QSlider(Qt.Orientation.Horizontal)
-        self.row_spacing.setRange(48, 110)
-        self.row_spacing.setValue(72)
-        self.lane_spacing = QSlider(Qt.Orientation.Horizontal)
-        self.lane_spacing.setRange(68, 150)
-        self.lane_spacing.setValue(96)
-
-        left = self._panel("Working Tree and Index", self.status_table)
+        self.working_panel = self._panel("Working Tree and Index", self.status_table)
         operations = self._operations_panel()
 
+        self.repo_panel = self._panel("Repository State", self.summary)
+        self.refs_panel = self._panel("References", self.refs_table)
+        self.remotes_panel = self._panel("Remotes", self.remotes_table)
         right = QWidget()
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(0, 0, 0, 0)
-        right_layout.addWidget(self._panel("Repository State", self.summary))
-        right_layout.addWidget(self._panel("References", self.refs_table), 2)
-        right_layout.addWidget(self._panel("Remotes", self.remotes_table), 1)
-
-        center = QWidget()
-        center_layout = QVBoxLayout(center)
-        center_layout.setContentsMargins(0, 0, 0, 0)
-        center_layout.addWidget(self._graph_controls())
-        center_layout.addWidget(graph_scroll, 1)
+        right_layout.addWidget(self.repo_panel)
+        right_layout.addWidget(self.refs_panel, 2)
+        right_layout.addWidget(self.remotes_panel, 1)
 
         main_splitter = QSplitter()
-        main_splitter.addWidget(left)
-        main_splitter.addWidget(center)
+        main_splitter.addWidget(self.working_panel)
+        main_splitter.addWidget(graph_scroll)
         main_splitter.addWidget(right)
         main_splitter.setChildrenCollapsible(False)
-        main_splitter.setSizes([330, 680, 360])
+        main_splitter.setSizes([330, 710, 370])
 
         bottom_splitter = QSplitter(Qt.Orientation.Horizontal)
         bottom_splitter.addWidget(operations)
         bottom_splitter.addWidget(self._panel("Operation / Preview / Commands", self.command_panel))
         bottom_splitter.setChildrenCollapsible(False)
-        bottom_splitter.setSizes([430, 850])
+        bottom_splitter.setSizes([430, 880])
 
         root = QWidget()
         root_layout = QVBoxLayout(root)
@@ -140,12 +135,11 @@ class MainWindow(QMainWindow):
         root_layout.addWidget(main_splitter, 1)
         root_layout.addWidget(bottom_splitter)
         self.setCentralWidget(root)
+        self._build_menus()
 
         self.open_button.clicked.connect(self._browse)
         self.refresh_button.clicked.connect(self.refresh)
         self.path_edit.returnPressed.connect(self.refresh)
-        self.row_spacing.valueChanged.connect(self.graph.set_row_spacing)
-        self.lane_spacing.valueChanged.connect(self.graph.set_lane_spacing)
         self.switch_button.clicked.connect(self._switch_branch)
         self.create_branch_button.clicked.connect(self._create_branch)
         self.stage_selected_button.clicked.connect(self._stage_selected)
@@ -157,10 +151,53 @@ class MainWindow(QMainWindow):
         self.ff_button.clicked.connect(self._fast_forward)
         self.push_button.clicked.connect(self._push)
 
+        self.refresh_timer = QTimer(self)
+        self.refresh_timer.setInterval(2500)
+        self.refresh_timer.timeout.connect(self._auto_refresh)
+        self.refresh_timer.start()
+
         if initial_path is not None:
             self.refresh()
         else:
             self._set_enabled(False)
+
+    def _build_menus(self) -> None:
+        file_menu = self.menuBar().addMenu("File")
+        open_action = QAction("Open Repository...", self)
+        open_action.triggered.connect(self._browse)
+        file_menu.addAction(open_action)
+        file_menu.addAction("Refresh", self.refresh)
+        file_menu.addSeparator()
+        file_menu.addAction("Quit", QApplication.instance().quit)
+
+        edit_menu = self.menuBar().addMenu("Edit")
+        edit_menu.addAction("Stage Selected", self._stage_selected)
+        edit_menu.addAction("Unstage Selected", self._unstage_selected)
+        edit_menu.addAction("Commit Staged", self._commit)
+
+        view_menu = self.menuBar().addMenu("View")
+        view_menu.addAction("Open Graph Window", self._open_graph_window)
+        view_menu.addAction("Open Status Window", self._open_status_window)
+        view_menu.addAction("Open Command Preview Window", self._open_command_window)
+        view_menu.addSeparator()
+        view_menu.addAction("Full Screen", self.showFullScreen)
+        view_menu.addAction("Maximized", self.showMaximized)
+        view_menu.addAction("Normal Size", self.showNormal)
+
+        preferences_menu = self.menuBar().addMenu("Preferences")
+        auto_refresh = QAction("Auto Refresh", self)
+        auto_refresh.setCheckable(True)
+        auto_refresh.setChecked(True)
+        auto_refresh.triggered.connect(self._set_auto_refresh)
+        preferences_menu.addAction(auto_refresh)
+
+        operations_menu = self.menuBar().addMenu("Operations")
+        operations_menu.addAction("Fetch", self._fetch)
+        operations_menu.addAction("Fast-forward Current Branch", self._fast_forward)
+        operations_menu.addAction("Push Current Branch", self._push)
+
+        help_menu = self.menuBar().addMenu("Help")
+        help_menu.addAction("About Gitualizer", self._about)
 
     def _table(self, headers: list[str]) -> QTableWidget:
         table = QTableWidget(0, len(headers))
@@ -178,15 +215,6 @@ class MainWindow(QMainWindow):
         group = QGroupBox(title)
         layout = QVBoxLayout(group)
         layout.addWidget(child)
-        return group
-
-    def _graph_controls(self) -> QWidget:
-        group = QGroupBox("Graph")
-        layout = QHBoxLayout(group)
-        layout.addWidget(QLabel("Row height"))
-        layout.addWidget(self.row_spacing)
-        layout.addWidget(QLabel("Lane width"))
-        layout.addWidget(self.lane_spacing)
         return group
 
     def _operations_panel(self) -> QWidget:
@@ -219,18 +247,33 @@ class MainWindow(QMainWindow):
             self.path_edit.setText(selected)
             self.refresh()
 
-    def refresh(self) -> None:
+    def _auto_refresh(self) -> None:
+        if self.auto_refresh_enabled and self.state is not None and not self.isActiveWindow():
+            self.refresh(show_errors=False)
+        elif self.auto_refresh_enabled and self.state is not None:
+            self.refresh(show_errors=False)
+
+    def _set_auto_refresh(self, enabled: bool) -> None:
+        self.auto_refresh_enabled = enabled
+
+    def refresh(self, show_errors: bool = True) -> None:
+        if self.refresh_in_progress:
+            return
+        self.refresh_in_progress = True
         try:
             self.state = self.reader.read(Path(self.path_edit.text()))
         except GitError as exc:
             self.state = None
             self.graph.set_state(None)
+            self.graph.set_preview_plan(None)
             self.summary.setText("No repository loaded.")
             self._set_changes([])
             self._set_refs([])
             self._set_remotes(None)
             self._set_enabled(False)
-            QMessageBox.warning(self, "Unable to Open Repository", str(exc))
+            if show_errors:
+                QMessageBox.warning(self, "Unable to Open Repository", str(exc))
+            self.refresh_in_progress = False
             return
         self.graph.set_state(self.state)
         self._set_summary(self.state)
@@ -239,6 +282,7 @@ class MainWindow(QMainWindow):
         self._set_remotes(self.state)
         self._refresh_controls(self.state)
         self._set_enabled(True)
+        self.refresh_in_progress = False
 
     def _set_enabled(self, enabled: bool) -> None:
         for widget in [
@@ -340,7 +384,8 @@ class MainWindow(QMainWindow):
         except ValueError as exc:
             QMessageBox.information(self, "Operation Not Available", str(exc))
             return
-        self.command_panel.setPlainText(_render_plan(plan))
+        self.graph.set_preview_plan(plan)
+        self.command_panel.setHtml(_render_plan_html(plan, details_open=False))
         dialog = CommandPlanDialog(plan, self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
@@ -362,10 +407,11 @@ class MainWindow(QMainWindow):
             self.refresh()
             return
         result = self.executor.execute(plan, current_state.path)
-        self.command_panel.setPlainText(_render_plan(plan) + "\n\n" + _render_result(result))
+        self.command_panel.setHtml(_render_plan_html(plan, details_open=True) + _render_result_html(result))
+        self.graph.set_preview_plan(None)
         self.refresh()
         if not result.success:
-            QMessageBox.warning(self, "Git Command Failed", _render_result(result))
+            QMessageBox.warning(self, "Git Command Failed", _render_result_text(result))
 
     def _switch_branch(self) -> None:
         self._with_plan(lambda state: self.planner.switch_branch(state, self.branch_combo.currentText()))
@@ -397,6 +443,37 @@ class MainWindow(QMainWindow):
     def _push(self) -> None:
         self._with_plan(self.planner.push_current_branch)
 
+    def _open_graph_window(self) -> None:
+        if self.state is None:
+            return
+        graph = CommitGraphWidget()
+        graph.set_state(self.state)
+        window = _child_window("Gitualizer - Graph", graph, 940, 720)
+        self.child_windows.append(window)
+        window.show()
+
+    def _open_status_window(self) -> None:
+        text = QTextEdit()
+        text.setReadOnly(True)
+        text.setPlainText(self.summary.text())
+        window = _child_window("Gitualizer - Repository Status", text, 620, 420)
+        self.child_windows.append(window)
+        window.show()
+
+    def _open_command_window(self) -> None:
+        text = QTextBrowser()
+        text.setHtml(self.command_panel.toHtml())
+        window = _child_window("Gitualizer - Command Preview", text, 760, 520)
+        self.child_windows.append(window)
+        window.show()
+
+    def _about(self) -> None:
+        QMessageBox.information(
+            self,
+            "About Gitualizer",
+            "Gitualizer visualizes Git state and always shows generated commands before execution.",
+        )
+
     def keyPressEvent(self, event) -> None:  # noqa: N802
         if event.key() == Qt.Key.Key_F5:
             self.refresh()
@@ -408,12 +485,23 @@ class CommandPlanDialog(QDialog):
     def __init__(self, plan: CommandPlan, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Confirm Git Commands")
-        self.resize(640, 520)
+        self.resize(700, 560)
         layout = QVBoxLayout(self)
-        text = QTextEdit()
+        text = QTextBrowser()
         text.setReadOnly(True)
-        text.setPlainText(_render_plan(plan))
+        text.setHtml(_render_plan_html(plan, details_open=False))
         layout.addWidget(text)
+        details_box = QGroupBox("Details")
+        details_box.setCheckable(True)
+        details_box.setChecked(False)
+        details_layout = QVBoxLayout(details_box)
+        details = QTextEdit()
+        details.setReadOnly(True)
+        details.setPlainText(_render_plan_text(plan))
+        details_layout.addWidget(details)
+        details.setVisible(False)
+        details_box.toggled.connect(details.setVisible)
+        layout.addWidget(details_box)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Ok)
         buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Execute")
         buttons.accepted.connect(self.accept)
@@ -421,7 +509,65 @@ class CommandPlanDialog(QDialog):
         layout.addWidget(buttons)
 
 
-def _render_plan(plan: CommandPlan) -> str:
+def _child_window(title: str, widget: QWidget, width: int, height: int) -> QMainWindow:
+    window = QMainWindow()
+    window.setWindowTitle(title)
+    window.resize(width, height)
+    window.setCentralWidget(widget)
+    window.setStyleSheet(APP_STYLE)
+    return window
+
+
+def _empty_preview_html() -> str:
+    return """
+    <div style="color:#6b7280;">Select an operation. Gitualizer will show the exact Git commands before execution.</div>
+    """
+
+
+def _render_plan_html(plan: CommandPlan, details_open: bool) -> str:
+    command_lines = "<br>".join(html.escape(step.display) for step in plan.steps)
+    command_block = (
+        "<div style='color:#ffffff; background:#102a43; border-radius:6px; padding:10px; "
+        "font-family:JetBrains Mono, DejaVu Sans Mono, monospace;'>"
+        f"{command_lines}</div>"
+    )
+    details = ""
+    if details_open:
+        details = _details_html(plan)
+    else:
+        details = (
+            "<div style='color:#6b7280; margin-top:10px;'>"
+            "Open the confirmation details to inspect expected effects, warnings, and impact.</div>"
+        )
+    return f"""
+    <h2 style="color:#1f2933;">{html.escape(plan.title)}</h2>
+    <p>{html.escape(plan.explanation)}</p>
+    {command_block}
+    {details}
+    """
+
+
+def _details_html(plan: CommandPlan) -> str:
+    effects = "".join(f"<li>{html.escape(effect)}</li>" for effect in plan.expected_effects)
+    warnings = "".join(f"<li>{html.escape(warning)}</li>" for warning in plan.warnings)
+    if not warnings:
+        warnings = "<li>None</li>"
+    if not effects:
+        effects = "<li>No explicit effects recorded.</li>"
+    return f"""
+    <div style="color:#1f2933;">
+      <p><b>History rewriting:</b> {'YES' if plan.history_rewrite else 'NO'}</p>
+      <p><b>Destructive:</b> {'YES' if plan.destructive else 'NO'}</p>
+      <p><b>Remote impact:</b> {html.escape(plan.remote_impact)}</p>
+      <p><b>Expected effects:</b></p>
+      <ul>{effects}</ul>
+      <p><b>Warnings:</b></p>
+      <ul>{warnings}</ul>
+    </div>
+    """
+
+
+def _render_plan_text(plan: CommandPlan) -> str:
     lines = [
         plan.title,
         "",
@@ -441,17 +587,32 @@ def _render_plan(plan: CommandPlan) -> str:
     return "\n".join(lines)
 
 
-def _render_result(result: ExecutionResult) -> str:
-    lines = ["Execution result:", "Success" if result.success else "Failed"]
+def _render_result_html(result: ExecutionResult) -> str:
+    color = "#1a7f37" if result.success else "#d1242f"
+    lines = [f"<h3 style='color:{color};'>{'Success' if result.success else 'Failed'}</h3>"]
+    for step in result.steps:
+        lines.append(
+            "<div style='color:#ffffff; background:#102a43; border-radius:6px; padding:10px; "
+            "font-family:JetBrains Mono, DejaVu Sans Mono, monospace;'>"
+            f"{html.escape(' '.join(step.args))}</div>"
+        )
+        lines.append(f"<p>exit code: {step.returncode}</p>")
+        if step.stdout.strip():
+            lines.append(f"<pre>{html.escape(step.stdout.strip())}</pre>")
+        if step.stderr.strip():
+            lines.append(f"<pre>{html.escape(step.stderr.strip())}</pre>")
+    return "\n".join(lines)
+
+
+def _render_result_text(result: ExecutionResult) -> str:
+    lines = ["Success" if result.success else "Failed"]
     for step in result.steps:
         lines.append("")
         lines.append(" ".join(step.args))
         lines.append(f"exit code: {step.returncode}")
         if step.stdout.strip():
-            lines.append("stdout:")
             lines.append(step.stdout.strip())
         if step.stderr.strip():
-            lines.append("stderr:")
             lines.append(step.stderr.strip())
     return "\n".join(lines)
 
@@ -462,6 +623,23 @@ QMainWindow, QWidget {
     color: #1f2933;
     font-family: "Inter", "Segoe UI", "Noto Sans", sans-serif;
     font-size: 10pt;
+}
+QMenuBar {
+    background: #ffffff;
+    border-bottom: 1px solid #d9e0e7;
+}
+QMenuBar::item {
+    padding: 6px 10px;
+}
+QMenuBar::item:selected, QMenu::item:selected {
+    background: #e8f2ff;
+}
+QMenu {
+    background: #ffffff;
+    border: 1px solid #d9e0e7;
+}
+QMenu::item {
+    padding: 6px 22px;
 }
 QGroupBox {
     background: #ffffff;
@@ -477,14 +655,14 @@ QGroupBox::title {
     color: #52616f;
     font-weight: 700;
 }
-QLineEdit, QComboBox, QTextEdit, QTableWidget {
+QLineEdit, QComboBox, QTextEdit, QTextBrowser, QTableWidget {
     background: #ffffff;
     border: 1px solid #cfd8e3;
     border-radius: 6px;
     padding: 6px;
     selection-background-color: #d8ecff;
 }
-QTextEdit {
+QTextEdit, QTextBrowser {
     font-family: "JetBrains Mono", "DejaVu Sans Mono", monospace;
 }
 QPushButton {
@@ -525,5 +703,28 @@ QScrollArea#graphScroll {
 }
 QLabel#summary {
     line-height: 1.35;
+}
+h2 {
+    color: #1f2933;
+    margin-bottom: 4px;
+}
+.command {
+    color: #ffffff;
+    background: #102a43;
+    border-radius: 6px;
+    padding: 10px;
+    font-family: "JetBrains Mono", "DejaVu Sans Mono", monospace;
+}
+.muted {
+    color: #6b7280;
+}
+.details {
+    color: #1f2933;
+}
+.success {
+    color: #1a7f37;
+}
+.failure {
+    color: #d1242f;
 }
 """
