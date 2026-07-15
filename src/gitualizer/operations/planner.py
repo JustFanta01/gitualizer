@@ -428,6 +428,49 @@ class OperationPlanner:
             state_fingerprint=state_fingerprint(state),
         )
 
+    def revert_commit_on_current_branch(self, state: RepositoryState, source: Commit) -> CommandPlan:
+        current = _current_branch_ref(state)
+        if current is None:
+            raise ValueError("A local branch must be checked out to revert a commit.")
+        return self.revert_commit_on_branch(state, source, current)
+
+    def drop_commit_from_current_branch(self, state: RepositoryState, source: Commit) -> CommandPlan:
+        current = _current_branch_ref(state)
+        if current is None:
+            raise ValueError("A local branch must be checked out to drop a commit.")
+        if len(source.parents) != 1:
+            raise ValueError("Only single-parent commits can be dropped with this rebase plan.")
+        parent = source.parents[0]
+        return CommandPlan(
+            title=f"Drop {source.short_oid} from {current.name}",
+            explanation=(
+                f"Rewrite `{current.name}` by replaying commits after `{source.short_oid}` onto its parent. "
+                "This removes the selected commit from the branch history."
+            ),
+            steps=[
+                CommandStep(["git", "switch", current.name], f"Attach HEAD to `{current.name}`."),
+                CommandStep(
+                    ["git", "rebase", "--onto", parent, source.oid, current.name],
+                    f"Replay commits after `{source.short_oid}` onto its parent.",
+                ),
+            ],
+            expected_effects=[
+                f"`{source.short_oid}` is removed from `{current.name}` history if the rebase succeeds.",
+                "Descendant commits are recreated with new hashes.",
+            ],
+            preview_steps=[
+                f"Find the parent of `{source.short_oid}`.",
+                f"Copy descendants of `{source.short_oid}` onto that parent.",
+                f"Move `{current.name}` to the rewritten commits.",
+            ],
+            warnings=[
+                "This rewrites branch history.",
+                "If this branch was pushed, pushing afterward may require force-with-lease.",
+            ],
+            history_rewrite=True,
+            state_fingerprint=state_fingerprint(state),
+        )
+
     def reset_branch_to_commit(self, state: RepositoryState, branch: Reference, commit: Commit, mode: str) -> CommandPlan:
         if branch.kind != "local_branch":
             raise ValueError("Drag a local branch onto a commit.")

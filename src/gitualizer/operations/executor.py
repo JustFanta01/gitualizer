@@ -17,7 +17,17 @@ class CommandExecutor:
             args = step.args
             if not args or args[0] != "git":
                 raise ValueError("Command plans must contain explicit git argument arrays.")
-            result = self.runner.run(args[1:], cwd=cwd, check=False)
+            result = self.runner.run(
+                args[1:],
+                cwd=cwd,
+                check=False,
+                env={
+                    "GIT_TERMINAL_PROMPT": "0",
+                    "GIT_ASKPASS": "echo",
+                    "SSH_ASKPASS": "echo",
+                },
+                timeout=120,
+            )
             results.append(
                 StepResult(
                     args=args,

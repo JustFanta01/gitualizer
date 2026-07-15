@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import os
 import subprocess
 from typing import Optional, Union
 
@@ -43,17 +44,31 @@ class GitRunner:
         cwd: Optional[Union[Path, str]] = None,
         *,
         check: bool = True,
+        env: Optional[dict[str, str]] = None,
+        timeout: Optional[float] = None,
     ) -> GitResult:
         command = [self.git_executable, *args]
         cwd_path = Path(cwd).resolve() if cwd is not None else None
-        completed = subprocess.run(
-            command,
-            cwd=cwd_path,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            shell=False,
-        )
+        process_env = os.environ.copy()
+        if env:
+            process_env.update(env)
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=cwd_path,
+                env=process_env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                shell=False,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired as exc:
+            stdout = exc.stdout if isinstance(exc.stdout, str) else ""
+            stderr = exc.stderr if isinstance(exc.stderr, str) else ""
+            if not stderr:
+                stderr = f"Command timed out after {timeout} seconds."
+            completed = subprocess.CompletedProcess(command, 124, stdout, stderr)
         result = GitResult(
             args=command,
             cwd=cwd_path,

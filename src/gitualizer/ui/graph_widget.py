@@ -24,6 +24,7 @@ class CommitGraphWidget(QWidget):
     commitDroppedOnReference = Signal(object, object)
     stageDroppedOnBranch = Signal(object)
     commitDroppedOnCommit = Signal(object, object)
+    commitDroppedToTrash = Signal(object)
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -39,6 +40,7 @@ class CommitGraphWidget(QWidget):
         self._hover_commit: Optional[Commit] = None
         self._external_stage_drag = False
         self._mode = "commits"
+        self._trash_rect = QRectF()
         self._row_spacing = 52
         self._lane_spacing = 72
         self.setMinimumSize(420, 340)
@@ -116,6 +118,7 @@ class CommitGraphWidget(QWidget):
         self._draw_preview(painter)
         self._draw_edges(painter)
         self._draw_commits(painter)
+        self._draw_trash(painter)
         self._draw_drag(painter)
 
     def _draw_branch_overview(self, painter: QPainter, include_remote_columns: bool) -> None:
@@ -303,6 +306,7 @@ class CommitGraphWidget(QWidget):
 
             painter.setPen(QColor("#20242a"))
             painter.setFont(QFont("Sans Serif", 8))
+            painter.drawText(QRectF(node.x - 32, node.y - 10, 20, 20), Qt.AlignmentFlag.AlignCenter, "|||")
             label = f"{commit.short_oid}  {commit.subject}"
             painter.drawText(QRectF(node.x + 18, node.y - 12, max(240, self.width() - node.x - 38), 20), label)
 
@@ -351,6 +355,21 @@ class CommitGraphWidget(QWidget):
         painter.drawRoundedRect(rect, 6, 6)
         painter.setPen(QColor("#1f6feb"))
         painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
+
+    def _draw_trash(self, painter: QPainter) -> None:
+        if self._drag_commit is None:
+            self._trash_rect = QRectF()
+            return
+        size = 44.0
+        margin = 18.0
+        self._trash_rect = QRectF(self.width() - size - margin, margin, size, size)
+        active = self._trash_rect.contains(self._drag_pos) if self._drag_pos is not None else False
+        painter.setPen(QPen(QColor("#d1242f"), 2))
+        painter.setBrush(QColor(209, 36, 47, 90 if active else 36))
+        painter.drawRoundedRect(self._trash_rect, 8, 8)
+        painter.setPen(QColor("#d1242f"))
+        painter.setFont(QFont("Sans Serif", 12, QFont.Weight.Bold))
+        painter.drawText(self._trash_rect, Qt.AlignmentFlag.AlignCenter, "X")
 
     def _is_possible_ref_drop(self, ref: Reference) -> bool:
         if self._external_stage_drag:
@@ -429,6 +448,9 @@ class CommitGraphWidget(QWidget):
                 self.referenceDroppedOnCommit.emit(source_ref, target_commit)
                 return
         if source_commit is not None:
+            if self._trash_rect.isValid() and self._trash_rect.contains(event.position().toPoint()):
+                self.commitDroppedToTrash.emit(source_commit)
+                return
             target_ref = self._reference_at(event.position().toPoint())
             if target_ref is not None:
                 self.commitDroppedOnReference.emit(source_commit, target_ref)

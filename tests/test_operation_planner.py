@@ -155,3 +155,23 @@ def test_drop_branch_on_commit_can_reset_or_create_branch() -> None:
     assert reset.history_rewrite is True
     assert reset.steps[1].args == ["git", "reset", "--hard", "c" * 40]
     assert create.steps[0].args == ["git", "branch", "recover-here", "c" * 40]
+
+
+def test_commit_trash_can_revert_or_drop_from_current_branch() -> None:
+    repo_state = state()
+    source = Commit(
+        "b" * 40,
+        "b" * 12,
+        ("a" * 40,),
+        "A",
+        "a@example.invalid",
+        "2024-01-01T00:00:00+00:00",
+        "source",
+    )
+
+    revert = OperationPlanner().revert_commit_on_current_branch(repo_state, source)
+    drop = OperationPlanner().drop_commit_from_current_branch(repo_state, source)
+
+    assert revert.steps[1].args == ["git", "revert", "--no-edit", "b" * 40]
+    assert drop.steps[1].args == ["git", "rebase", "--onto", "a" * 40, "b" * 40, "main"]
+    assert drop.history_rewrite is True

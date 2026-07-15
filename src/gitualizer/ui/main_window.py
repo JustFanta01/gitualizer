@@ -130,6 +130,7 @@ class MainWindow(QMainWindow):
         self.graph.commitDroppedOnReference.connect(self._handle_commit_drop_on_reference)
         self.graph.stageDroppedOnBranch.connect(self._handle_stage_drop_on_branch)
         self.graph.commitDroppedOnCommit.connect(self._handle_commit_drop_on_commit)
+        self.graph.commitDroppedToTrash.connect(self._handle_commit_drop_to_trash)
         self.file_status.changesDroppedToStage.connect(self._handle_changes_drop_to_stage)
         self.file_status.changesDroppedToWorking.connect(self._handle_changes_drop_to_working)
         self.file_status.changesDroppedToTrash.connect(self._handle_changes_drop_to_trash)
@@ -232,7 +233,18 @@ class MainWindow(QMainWindow):
             return
         self.fetch_in_progress = True
         try:
-            result = self.reader.runner.run(["fetch", "--all", "--prune"], cwd=self.state.path, check=False)
+            result = self.reader.runner.run(
+                ["fetch", "--all", "--prune"],
+                cwd=self.state.path,
+                check=False,
+                env={
+                    "GIT_TERMINAL_PROMPT": "0",
+                    "GIT_ASKPASS": "echo",
+                    "SSH_ASKPASS": "echo",
+                    "GIT_SSH_COMMAND": "ssh -o BatchMode=yes",
+                },
+                timeout=45,
+            )
             if result.returncode == 0:
                 self.refresh(show_errors=False)
         finally:
@@ -490,6 +502,27 @@ class MainWindow(QMainWindow):
         if confirm.exec() != QDialog.DialogCode.Accepted:
             return
         self._execute_plan(plan)
+
+    def _handle_commit_drop_to_trash(self, source: Commit) -> None:
+        if self.state is None:
+            return
+        plans: list[CommandPlan] = []
+        try:
+            plans.append(self.planner.revert_commit_on_current_branch(self.state, source))
+        except ValueError:
+            pass
+        try:
+            plans.append(self.planner.drop_commit_from_current_branch(self.state, source))
+        except ValueError:
+            pass
+        if not plans:
+            QMessageBox.information(
+                self,
+                "Operation Not Available",
+                "This commit cannot be deleted from the current branch with an available safe plan.",
+            )
+            return
+        self._choose_preview_and_execute(source.short_oid, "trash", plans)
 
     def _handle_commit_drop_on_reference(self, source: Commit, target: Reference) -> None:
         if self.state is None:
@@ -866,8 +899,8 @@ def _render_result_text(result: ExecutionResult) -> str:
 
 APP_STYLE = """
 QMainWindow, QWidget {
-    background: #f4f6f8;
-    color: #1f2933;
+    background: #f6f8fa;
+    color: #1f2937;
     font-family: "Inter", "Segoe UI", "Noto Sans", sans-serif;
     font-size: 9pt;
 }
@@ -890,7 +923,7 @@ QMenu::item {
 }
 QGroupBox {
     background: #ffffff;
-    border: 1px solid #d9e0e7;
+    border: 1px solid #d8dee4;
     border-radius: 8px;
     margin-top: 14px;
     padding: 7px;
@@ -899,12 +932,12 @@ QGroupBox::title {
     subcontrol-origin: margin;
     left: 12px;
     padding: 0 6px;
-    color: #52616f;
+    color: #4b5563;
     font-weight: 700;
 }
 QLineEdit, QTextEdit, QTextBrowser, QTableWidget, QListWidget, QLabel#dropZone {
     background: #ffffff;
-    border: 1px solid #cfd8e3;
+    border: 1px solid #d0d7de;
     border-radius: 6px;
     padding: 4px;
     selection-background-color: #d8ecff;
@@ -944,8 +977,19 @@ QListWidget[dropActive="true"], QLabel[dropActive="true"] {
     border: 2px solid #1f6feb;
     background: #e8f2ff;
 }
+QLabel#dropZone {
+    color: #d1242f;
+    border-color: #f1aeb5;
+    background: #fff5f5;
+    font-weight: 800;
+}
+QLabel#dropZone[dropActive="true"] {
+    border: 2px solid #d1242f;
+    background: #ffe3e6;
+    color: #a40e26;
+}
 QLabel#subtleHeading {
-    color: #52616f;
+    color: #4b5563;
     font-weight: 700;
     border: 0;
     padding: 0;
