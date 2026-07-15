@@ -38,6 +38,7 @@ class CommitGraphWidget(QWidget):
         self._hover_ref: Optional[Reference] = None
         self._hover_commit: Optional[Commit] = None
         self._external_stage_drag = False
+        self._mode = "commits"
         self._row_spacing = 64
         self._lane_spacing = 88
         self.setMinimumSize(420, 340)
@@ -55,6 +56,10 @@ class CommitGraphWidget(QWidget):
 
     def set_preview_plan(self, plan: Optional[CommandPlan]) -> None:
         self._preview_plan = plan
+        self.update()
+
+    def set_mode(self, mode: str) -> None:
+        self._mode = mode
         self.update()
 
     def _layout_nodes(self, state: Optional[RepositoryState]) -> dict[str, CommitNode]:
@@ -96,6 +101,14 @@ class CommitGraphWidget(QWidget):
         if self._state is None:
             self._draw_empty(painter, "Open a Git repository to inspect it.")
             return
+        if self._mode == "branches":
+            self._draw_branch_overview(painter, include_remote_columns=False)
+            self._draw_drag(painter)
+            return
+        if self._mode == "local_remote":
+            self._draw_branch_overview(painter, include_remote_columns=True)
+            self._draw_drag(painter)
+            return
         self._draw_git_flow(painter)
         if not self._state.commits:
             self._draw_empty(painter, "Repository has no commits yet.")
@@ -104,6 +117,63 @@ class CommitGraphWidget(QWidget):
         self._draw_edges(painter)
         self._draw_commits(painter)
         self._draw_drag(painter)
+
+    def _draw_branch_overview(self, painter: QPainter, include_remote_columns: bool) -> None:
+        assert self._state is not None
+        painter.setFont(QFont("Sans Serif", 10, QFont.Weight.Bold))
+        painter.setPen(QColor("#1f2933"))
+        if include_remote_columns:
+            columns = [("Local branches", self._state.local_branches, 48.0), ("Remote-tracking", self._state.remote_tracking_branches, 360.0)]
+        else:
+            refs = self._state.local_branches + self._state.remote_tracking_branches + self._state.tags
+            columns = [("Branches and refs", refs, 48.0)]
+        for title, refs, x in columns:
+            painter.drawText(QRectF(x, 28, 260, 24), title)
+            y = 68.0
+            for ref in refs:
+                self._draw_branch_card(painter, ref, x, y, include_remote_columns)
+                y += 46
+        if self._state.commits_truncated:
+            painter.setPen(QColor("#6b7280"))
+            painter.setFont(QFont("Sans Serif", 8))
+            painter.drawText(QRectF(48, self.height() - 34, 620, 24), f"Commit history is lazy-loaded: showing latest {self._state.commit_limit} commits.")
+
+    def _draw_branch_card(self, painter: QPainter, ref: Reference, x: float, y: float, include_remote_columns: bool) -> None:
+        color = {
+            "local_branch": QColor("#1a7f37"),
+            "remote_tracking": QColor("#8250df"),
+            "tag": QColor("#bf8700"),
+        }.get(ref.kind, QColor("#57606a"))
+        width = 260.0
+        rect = QRectF(x, y, width, 34)
+        self._ref_hitboxes.append((rect, ref))
+        is_target = self._hover_ref is not None and self._hover_ref.full_name == ref.full_name
+        is_possible = self._is_possible_ref_drop(ref)
+        painter.setPen(QPen(color, 2 if is_target or is_possible else 1))
+        painter.setBrush(QColor(color.red(), color.green(), color.blue(), 72 if is_target else (46 if is_possible else 20)))
+        painter.drawRoundedRect(rect, 7, 7)
+        painter.setPen(color)
+        painter.setFont(QFont("Sans Serif", 9, QFont.Weight.Bold))
+        painter.drawText(rect.adjusted(10, 3, -54, -3), Qt.AlignmentFlag.AlignVCenter, ref.name)
+        painter.setFont(QFont("Sans Serif", 8))
+        painter.setPen(QColor("#52616f"))
+        meta = ref.target[:12]
+        if ref.upstream:
+            meta = f"{meta}  -> {ref.upstream}"
+        painter.drawText(rect.adjusted(10, 17, -10, 0), meta)
+        if ref.behind and ref.behind > 0:
+            painter.setBrush(QColor("#2da44e"))
+            painter.setPen(QPen(QColor("#ffffff"), 1))
+            painter.drawEllipse(QPointF(x + width - 22, y + 17), 9, 9)
+            painter.setPen(QColor("#ffffff"))
+            painter.setFont(QFont("Sans Serif", 7, QFont.Weight.Bold))
+            painter.drawText(QRectF(x + width - 31, y + 8, 18, 18), Qt.AlignmentFlag.AlignCenter, str(ref.behind))
+        if include_remote_columns and ref.ahead and ref.ahead > 0:
+            painter.setBrush(QColor("#d1242f"))
+            painter.setPen(QPen(QColor("#ffffff"), 1))
+            painter.drawEllipse(QPointF(x + width - 44, y + 17), 9, 9)
+            painter.setPen(QColor("#ffffff"))
+            painter.drawText(QRectF(x + width - 53, y + 8, 18, 18), Qt.AlignmentFlag.AlignCenter, str(ref.ahead))
 
     def _draw_empty(self, painter: QPainter, text: str) -> None:
         painter.setPen(QColor("#666a73"))
@@ -217,7 +287,12 @@ class CommitGraphWidget(QWidget):
                 continue
             self._commit_hitboxes.append((QRectF(node.x - 13, node.y - 13, 26, 26), commit))
             is_head = self._state.head.oid == commit.oid
+            is_commit_target = self._is_possible_commit_drop(commit)
             fill = QColor("#1f6feb") if is_head else QColor("#26313d")
+            if is_commit_target:
+                painter.setPen(QPen(QColor("#2da44e"), 5))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawEllipse(QPointF(node.x, node.y), 15, 15)
             if is_head:
                 painter.setPen(QPen(QColor("#9ed0ff"), 6))
                 painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -281,11 +356,20 @@ class CommitGraphWidget(QWidget):
         if self._external_stage_drag:
             return ref.kind == "local_branch"
         if self._drag_ref is None:
+            if self._drag_commit is not None:
+                return ref.kind == "local_branch"
             return False
         if self._drag_ref.kind == "remote_tracking":
             return ref.kind == "local_branch"
         if self._drag_ref.kind == "local_branch":
             return ref.kind == "local_branch" and ref.full_name != self._drag_ref.full_name
+        return False
+
+    def _is_possible_commit_drop(self, commit: Commit) -> bool:
+        if self._drag_ref is not None and self._drag_ref.kind == "local_branch":
+            return True
+        if self._drag_commit is not None:
+            return commit.oid != self._drag_commit.oid
         return False
 
     def mousePressEvent(self, event) -> None:  # noqa: N802

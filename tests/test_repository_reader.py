@@ -93,3 +93,16 @@ def test_reads_unborn_repository(tmp_path: Path) -> None:
     assert state.head.oid is None
     assert state.commits == {}
     assert state.references == []
+
+
+def test_commit_loading_can_be_limited(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path / "limited")
+    for index in range(5):
+        write(repo, "file.txt", f"{index}\n")
+        commit(repo, f"commit {index}")
+
+    state = RepositoryReader().read(repo, commit_limit=3)
+
+    assert len(state.commits) == 3
+    assert state.commits_truncated is True
+    assert state.commit_limit == 3

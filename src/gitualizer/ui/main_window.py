@@ -49,7 +49,10 @@ class MainWindow(QMainWindow):
         self.executor = CommandExecutor()
         self.state: Optional[RepositoryState] = None
         self.auto_refresh_enabled = True
+        self.auto_fetch_enabled = True
         self.refresh_in_progress = False
+        self.commit_limit = 300
+        self.fetch_in_progress = False
         self.setWindowTitle("Gitualizer")
         self.resize(980, 640)
         self.setStyleSheet(APP_STYLE)
@@ -98,6 +101,7 @@ class MainWindow(QMainWindow):
         right_layout.addWidget(self.remotes_panel, 1)
 
         self.graph_scroll = graph_scroll
+        self.graph_scroll.verticalScrollBar().valueChanged.connect(self._maybe_load_more_commits)
         self.main_splitter = QSplitter()
         self.main_splitter.addWidget(self.working_panel)
         self.main_splitter.addWidget(self.graph_scroll)
@@ -133,6 +137,10 @@ class MainWindow(QMainWindow):
         self.refresh_timer.setInterval(2500)
         self.refresh_timer.timeout.connect(self._auto_refresh)
         self.refresh_timer.start()
+        self.fetch_timer = QTimer(self)
+        self.fetch_timer.setInterval(60000)
+        self.fetch_timer.timeout.connect(self._auto_fetch)
+        self.fetch_timer.start()
 
         if initial_path is not None:
             self.refresh()
@@ -157,6 +165,10 @@ class MainWindow(QMainWindow):
         view_menu.addAction("Status Focus", self._status_focus_mode)
         view_menu.addAction("Command Focus", self._command_focus_mode)
         view_menu.addSeparator()
+        view_menu.addAction("Graph Layout: Commits", self._commits_layout)
+        view_menu.addAction("Graph Layout: Branches", self._branches_layout)
+        view_menu.addAction("Graph Layout: Local vs Remote", self._local_remote_layout)
+        view_menu.addSeparator()
         view_menu.addAction("Toggle Full Screen", self._toggle_fullscreen)
         view_menu.addAction("Maximized", self.showMaximized)
         view_menu.addAction("Normal Size", self.showNormal)
@@ -167,6 +179,11 @@ class MainWindow(QMainWindow):
         auto_refresh.setChecked(True)
         auto_refresh.triggered.connect(self._set_auto_refresh)
         preferences_menu.addAction(auto_refresh)
+        auto_fetch = QAction("Auto Fetch Remotes", self)
+        auto_fetch.setCheckable(True)
+        auto_fetch.setChecked(True)
+        auto_fetch.triggered.connect(self._set_auto_fetch)
+        preferences_menu.addAction(auto_fetch)
 
         help_menu = self.menuBar().addMenu("Help")
         help_menu.addAction("About Gitualizer", self._about)
@@ -204,12 +221,26 @@ class MainWindow(QMainWindow):
     def _set_auto_refresh(self, enabled: bool) -> None:
         self.auto_refresh_enabled = enabled
 
+    def _set_auto_fetch(self, enabled: bool) -> None:
+        self.auto_fetch_enabled = enabled
+
+    def _auto_fetch(self) -> None:
+        if not self.auto_fetch_enabled or self.state is None or self.fetch_in_progress or not self.state.remotes:
+            return
+        self.fetch_in_progress = True
+        try:
+            result = self.reader.runner.run(["fetch", "--all", "--prune"], cwd=self.state.path, check=False)
+            if result.returncode == 0:
+                self.refresh(show_errors=False)
+        finally:
+            self.fetch_in_progress = False
+
     def refresh(self, show_errors: bool = True) -> None:
         if self.refresh_in_progress:
             return
         self.refresh_in_progress = True
         try:
-            self.state = self.reader.read(Path(self.path_edit.text()))
+            self.state = self.reader.read(Path(self.path_edit.text()), commit_limit=self.commit_limit)
         except GitError as exc:
             self.state = None
             self.graph.set_state(None)
@@ -248,9 +279,17 @@ class MainWindow(QMainWindow):
             f"Path: {state.path}\n"
             f"HEAD: {head_label}\n"
             f"Current branch: {branch}\n"
-            f"Commits loaded: {len(state.commits)}\n"
+            f"Commits loaded: {len(state.commits)}{'+' if state.commits_truncated else ''}\n"
             f"Operation in progress: {operation}"
         )
+
+    def _maybe_load_more_commits(self, value: int) -> None:
+        if self.state is None or not self.state.commits_truncated:
+            return
+        bar = self.graph_scroll.verticalScrollBar()
+        if value >= bar.maximum() - 80:
+            self.commit_limit += 300
+            self.refresh(show_errors=False)
 
     def _set_changes(self, changes: list[FileChange]) -> None:
         self.file_status.set_changes(changes)
@@ -495,6 +534,19 @@ class MainWindow(QMainWindow):
         self.graph_scroll.show()
         self.right_panel.hide()
         self.command_panel_group.show()
+
+    def _commits_layout(self) -> None:
+        self.graph.set_mode("commits")
+        self._workspace_mode()
+
+    def _branches_layout(self) -> None:
+        self.graph.set_mode("branches")
+        self._graph_focus_mode()
+        self.command_panel_group.show()
+
+    def _local_remote_layout(self) -> None:
+        self.graph.set_mode("local_remote")
+        self._workspace_mode()
 
     def _toggle_fullscreen(self) -> None:
         if self.isFullScreen():

@@ -23,13 +23,13 @@ class RepositoryReader:
     def __init__(self, runner: Optional[GitRunner] = None) -> None:
         self.runner = runner or GitRunner()
 
-    def read(self, path: Union[Path, str]) -> RepositoryState:
+    def read(self, path: Union[Path, str], commit_limit: int = 300) -> RepositoryState:
         requested_path = Path(path).expanduser().resolve()
         root = self._repository_root(requested_path)
         git_dir = Path(self.runner.run(["rev-parse", "--absolute-git-dir"], cwd=root).stdout.strip())
         head = self._read_head(root)
         references = self._read_references(root)
-        commits = self._read_commits(root)
+        commits, commits_truncated = self._read_commits(root, commit_limit)
         remotes = self._read_remotes(root)
         changes = self._read_changes(root)
         operation = self._read_operation_state(git_dir)
@@ -42,6 +42,8 @@ class RepositoryReader:
             remotes=remotes,
             changes=changes,
             operation=operation,
+            commit_limit=commit_limit,
+            commits_truncated=commits_truncated,
         )
 
     def _repository_root(self, path: Path) -> Path:
@@ -111,15 +113,22 @@ class RepositoryReader:
             behind = int(groups[3])
         return ahead, behind
 
-    def _read_commits(self, root: Path) -> dict[str, Commit]:
+    def _read_commits(self, root: Path, commit_limit: int) -> tuple[dict[str, Commit], bool]:
         fmt = "%H%x1f%P%x1f%an%x1f%ae%x1f%aI%x1f%s%x1e"
-        result = self.runner.run(["log", "--all", "--date-order", f"--format={fmt}"], cwd=root, check=False)
+        limit = max(1, commit_limit + 1)
+        result = self.runner.run(["log", "--all", "--date-order", f"--max-count={limit}", f"--format={fmt}"], cwd=root, check=False)
         if result.returncode != 0:
-            return {}
+            return {}, False
         commits: dict[str, Commit] = {}
+        seen = 0
+        truncated = False
         for record in result.stdout.split("\x1e"):
             if not record.strip():
                 continue
+            seen += 1
+            if seen > commit_limit:
+                truncated = True
+                break
             fields = (record.strip("\n").split("\x1f") + [""] * 6)[:6]
             oid, parents, author_name, author_email, author_date, subject = fields
             commits[oid] = Commit(
@@ -131,7 +140,7 @@ class RepositoryReader:
                 author_date=author_date,
                 subject=subject,
             )
-        return commits
+        return commits, truncated
 
     def _read_remotes(self, root: Path) -> list[Remote]:
         result = self.runner.run(["remote", "-v"], cwd=root, check=False)

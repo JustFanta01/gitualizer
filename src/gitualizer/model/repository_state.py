@@ -89,6 +89,8 @@ class RepositoryState:
     remotes: list[Remote] = field(default_factory=list)
     changes: list[FileChange] = field(default_factory=list)
     operation: OperationState = field(default_factory=OperationState)
+    commit_limit: int = 300
+    commits_truncated: bool = False
 
     @property
     def local_branches(self) -> list[Reference]:
