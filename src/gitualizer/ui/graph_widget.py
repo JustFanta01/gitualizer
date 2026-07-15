@@ -25,6 +25,8 @@ class CommitGraphWidget(QWidget):
     stageDroppedOnBranch = Signal(object)
     commitDroppedOnCommit = Signal(object, object)
     commitDroppedToTrash = Signal(object)
+    commitContextRequested = Signal(object, object)
+    referenceContextRequested = Signal(object, object)
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -471,6 +473,19 @@ class CommitGraphWidget(QWidget):
         self._hover_ref = None
         self._hover_commit = None
         super().leaveEvent(event)
+
+    def contextMenuEvent(self, event) -> None:  # noqa: N802
+        ref = self._reference_at(event.pos())
+        if ref is not None:
+            self.referenceContextRequested.emit(ref, event.globalPos())
+            event.accept()
+            return
+        commit = self._commit_at(event.pos())
+        if commit is not None:
+            self.commitContextRequested.emit(commit, event.globalPos())
+            event.accept()
+            return
+        super().contextMenuEvent(event)
 
     def _set_external_stage_drag(self, active: bool, pos: Optional[QPoint] = None) -> None:
         self._external_stage_drag = active

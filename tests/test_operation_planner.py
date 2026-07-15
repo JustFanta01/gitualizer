@@ -40,6 +40,24 @@ def test_switch_branch_plan_uses_argument_array() -> None:
     assert "git switch feature" in plan.commands_text
 
 
+def test_switch_to_commit_uses_detached_head_plan() -> None:
+    target = Commit("c" * 40, "c" * 12, tuple(), "A", "a@example.invalid", "2024-01-01T00:00:00+00:00", "target")
+
+    plan = OperationPlanner().switch_to_commit(state(), target)
+
+    assert plan.steps[0].args == ["git", "switch", "--detach", "c" * 40]
+    assert "No branch label moves." in plan.expected_effects
+
+
+def test_create_and_switch_branch_at_commit_uses_switch_c() -> None:
+    target = Commit("c" * 40, "c" * 12, tuple(), "A", "a@example.invalid", "2024-01-01T00:00:00+00:00", "target")
+
+    plan = OperationPlanner().create_and_switch_branch_at_commit(state(), target, "try-here")
+
+    assert plan.steps[0].args == ["git", "switch", "-c", "try-here", "c" * 40]
+    assert "HEAD attaches to `try-here`." in plan.expected_effects
+
+
 def test_commit_requires_staged_changes_and_message() -> None:
     planner = OperationPlanner()
 
@@ -103,6 +121,7 @@ def test_drag_staging_area_onto_branch_creates_commit_plan() -> None:
 
     assert plan.steps[0].args == ["git", "switch", "feature"]
     assert plan.steps[1].args == ["git", "commit", "-m", "Save staged work"]
+    assert "staging area" in plan.explanation
 
 
 def test_drag_changes_to_trash_creates_destructive_discard_plan() -> None:

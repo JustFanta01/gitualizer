@@ -52,8 +52,6 @@ class ChangeListWidget(QListWidget):
         mime = QMimeData()
         payload = json.dumps([_change_payload(change) for change in changes]).encode("utf-8")
         mime.setData(CHANGE_MIME, QByteArray(payload))
-        if self.area == "staged":
-            mime.setData(STAGE_MIME, QByteArray(b"1"))
         drag.setMimeData(mime)
         drag.exec(Qt.DropAction.MoveAction)
         self.dragEnded.emit()
@@ -103,6 +101,7 @@ class FileStatusWidget(QWidget):
         super().__init__(parent)
         self.working_list = ChangeListWidget("working")
         self.staged_list = ChangeListWidget("staged")
+        self.stage_handle = StageAreaDragHandle()
         self.trash_zone = DropZone("[X]")
         self.trash_zone.setToolTip("Discard selected changes")
         self.staged_list.setAcceptDrops(True)
@@ -115,6 +114,8 @@ class FileStatusWidget(QWidget):
         self.staged_list.dragStarted.connect(self._show_drag_targets)
         self.working_list.dragEnded.connect(self._clear_drag_targets)
         self.staged_list.dragEnded.connect(self._clear_drag_targets)
+        self.stage_handle.dragStarted.connect(lambda: self._show_drag_targets("stage_area"))
+        self.stage_handle.dragEnded.connect(self._clear_drag_targets)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -128,7 +129,7 @@ class FileStatusWidget(QWidget):
         lists.setContentsMargins(0, 0, 0, 0)
         lists.setSpacing(8)
         lists.addWidget(self._column("Working Tree", self.working_list))
-        lists.addWidget(self._column("Staging Area / Index", self.staged_list))
+        lists.addWidget(self._column("Staging Area / Index", self.staged_list, self.stage_handle))
         layout.addLayout(header)
         layout.addLayout(lists)
 
@@ -144,7 +145,7 @@ class FileStatusWidget(QWidget):
     def dropEvent(self, event) -> None:  # noqa: N802
         event.ignore()
 
-    def _column(self, title: str, list_widget: QWidget) -> QWidget:
+    def _column(self, title: str, list_widget: QWidget, drag_handle: Optional[QWidget] = None) -> QWidget:
         widget = QWidget()
         layout = QVBoxLayout(widget)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -152,6 +153,8 @@ class FileStatusWidget(QWidget):
         label = QLabel(title)
         label.setObjectName("subtleHeading")
         layout.addWidget(label)
+        if drag_handle is not None:
+            layout.addWidget(drag_handle)
         layout.addWidget(list_widget)
         return widget
 
@@ -174,11 +177,43 @@ class FileStatusWidget(QWidget):
             self.staged_list.set_drop_hint(True)
         elif area == "staged":
             self.working_list.set_drop_hint(True)
+        elif area == "stage_area":
+            self.stage_handle.set_drop_active(True)
 
     def _clear_drag_targets(self) -> None:
         self.trash_zone.set_drop_active(False)
         self.working_list.set_drop_hint(False)
         self.staged_list.set_drop_hint(False)
+        self.stage_handle.set_drop_active(False)
+
+
+class StageAreaDragHandle(QLabel):
+    dragStarted = Signal()
+    dragEnded = Signal()
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__("|||  Commit whole staging area", parent)
+        self.setObjectName("stageHandle")
+        self.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+        self.setCursor(Qt.CursorShape.OpenHandCursor)
+        self.setProperty("dropActive", False)
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() != Qt.MouseButton.LeftButton:
+            super().mousePressEvent(event)
+            return
+        self.dragStarted.emit()
+        drag = QDrag(self)
+        mime = QMimeData()
+        mime.setData(STAGE_MIME, QByteArray(b"1"))
+        drag.setMimeData(mime)
+        drag.exec(Qt.DropAction.MoveAction)
+        self.dragEnded.emit()
+
+    def set_drop_active(self, active: bool) -> None:
+        self.setProperty("dropActive", active)
+        self.style().unpolish(self)
+        self.style().polish(self)
 
 
 class DropZone(QLabel):

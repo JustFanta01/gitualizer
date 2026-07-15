@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
     QScrollArea,
@@ -131,6 +132,8 @@ class MainWindow(QMainWindow):
         self.graph.stageDroppedOnBranch.connect(self._handle_stage_drop_on_branch)
         self.graph.commitDroppedOnCommit.connect(self._handle_commit_drop_on_commit)
         self.graph.commitDroppedToTrash.connect(self._handle_commit_drop_to_trash)
+        self.graph.commitContextRequested.connect(self._show_commit_context_menu)
+        self.graph.referenceContextRequested.connect(self._show_reference_context_menu)
         self.file_status.changesDroppedToStage.connect(self._handle_changes_drop_to_stage)
         self.file_status.changesDroppedToWorking.connect(self._handle_changes_drop_to_working)
         self.file_status.changesDroppedToTrash.connect(self._handle_changes_drop_to_trash)
@@ -433,7 +436,12 @@ class MainWindow(QMainWindow):
     def _handle_stage_drop_on_branch(self, branch: Reference) -> None:
         if self.state is None:
             return
-        message, accepted = QInputDialog.getText(self, "Commit Message", f"Commit staged changes to `{branch.name}`:")
+        staged_count = len(self.state.staged_changes)
+        message, accepted = QInputDialog.getText(
+            self,
+            "Commit Whole Staging Area",
+            f"Create one commit on `{branch.name}` from all {staged_count} staged change(s):",
+        )
         if not accepted:
             return
         try:
@@ -447,6 +455,65 @@ class MainWindow(QMainWindow):
         if confirm.exec() != QDialog.DialogCode.Accepted:
             return
         self._execute_plan(plan)
+
+    def _show_commit_context_menu(self, commit: Commit, global_pos) -> None:
+        if self.state is None:
+            return
+        menu = QMenu(self)
+        switch_detached = menu.addAction(f"Switch to {commit.short_oid} detached")
+        create_branch = menu.addAction("Create Branch Here...")
+        create_and_switch = menu.addAction("Create and Switch Branch Here...")
+        menu.addSeparator()
+        copy_oid = menu.addAction("Copy Commit Hash")
+        selected = menu.exec(global_pos)
+        if selected is None:
+            return
+        if selected == copy_oid:
+            QApplication.clipboard().setText(commit.oid)
+            return
+        try:
+            if selected == switch_detached:
+                self._preview_and_confirm(self.planner.switch_to_commit(self.state, commit))
+                return
+            if selected in {create_branch, create_and_switch}:
+                branch_name, accepted = QInputDialog.getText(
+                    self,
+                    "Branch Name",
+                    f"New branch at `{commit.short_oid}`:",
+                )
+                if not accepted:
+                    return
+                if selected == create_branch:
+                    plan = self.planner.create_branch_at_commit(self.state, commit, branch_name)
+                else:
+                    plan = self.planner.create_and_switch_branch_at_commit(self.state, commit, branch_name)
+                self._preview_and_confirm(plan)
+        except ValueError as exc:
+            QMessageBox.information(self, "Operation Not Available", str(exc))
+
+    def _show_reference_context_menu(self, ref: Reference, global_pos) -> None:
+        if self.state is None:
+            return
+        menu = QMenu(self)
+        switch_branch = None
+        if ref.kind == "local_branch":
+            switch_branch = menu.addAction(f"Switch to {ref.name}")
+        copy_ref = menu.addAction("Copy Reference Name")
+        copy_target = menu.addAction("Copy Target Hash")
+        selected = menu.exec(global_pos)
+        if selected is None:
+            return
+        if selected == copy_ref:
+            QApplication.clipboard().setText(ref.name)
+            return
+        if selected == copy_target:
+            QApplication.clipboard().setText(ref.target)
+            return
+        if switch_branch is not None and selected == switch_branch:
+            try:
+                self._preview_and_confirm(self.planner.switch_branch(self.state, ref.name))
+            except ValueError as exc:
+                QMessageBox.information(self, "Operation Not Available", str(exc))
 
     def _handle_changes_drop_to_trash(self, changes: list[FileChange]) -> None:
         if self.state is None:
@@ -935,7 +1002,7 @@ QGroupBox::title {
     color: #4b5563;
     font-weight: 700;
 }
-QLineEdit, QTextEdit, QTextBrowser, QTableWidget, QListWidget, QLabel#dropZone {
+QLineEdit, QTextEdit, QTextBrowser, QTableWidget, QListWidget, QLabel#dropZone, QLabel#stageHandle {
     background: #ffffff;
     border: 1px solid #d0d7de;
     border-radius: 6px;
@@ -987,6 +1054,16 @@ QLabel#dropZone[dropActive="true"] {
     border: 2px solid #d1242f;
     background: #ffe3e6;
     color: #a40e26;
+}
+QLabel#stageHandle {
+    color: #9a6700;
+    background: #fff8c5;
+    border-color: #eac54f;
+    font-weight: 700;
+}
+QLabel#stageHandle[dropActive="true"] {
+    border: 2px solid #bf8700;
+    background: #fff1a7;
 }
 QLabel#subtleHeading {
     color: #4b5563;

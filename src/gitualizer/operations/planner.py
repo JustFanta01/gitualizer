@@ -37,6 +37,29 @@ class OperationPlanner:
             state_fingerprint=state_fingerprint(state),
         )
 
+    def switch_to_commit(self, state: RepositoryState, commit: Commit) -> CommandPlan:
+        if state.head.oid == commit.oid and state.head.detached:
+            raise ValueError("HEAD is already detached at that commit.")
+        return CommandPlan(
+            title=f"Switch to {commit.short_oid} detached",
+            explanation=(
+                f"Attach the working tree and HEAD directly to commit `{commit.short_oid}` without moving any branch. "
+                "This is Git's detached HEAD mode."
+            ),
+            steps=[CommandStep(["git", "switch", "--detach", commit.oid], "Check out the selected commit without a branch.")],
+            expected_effects=[
+                f"HEAD points directly at `{commit.short_oid}`.",
+                "No branch label moves.",
+                "Git may refuse if local changes would be overwritten.",
+            ],
+            preview_steps=[
+                f"Detach HEAD from `{state.head.branch or state.head.short_oid or 'current position'}`.",
+                f"Place HEAD on commit `{commit.short_oid}`.",
+                "Leave all branch labels where they are.",
+            ],
+            state_fingerprint=state_fingerprint(state),
+        )
+
     def create_branch(self, state: RepositoryState, branch: str) -> CommandPlan:
         branch = branch.strip()
         if not branch:
@@ -50,6 +73,33 @@ class OperationPlanner:
             steps=[CommandStep(["git", "branch", branch], "Create the branch without switching to it.")],
             expected_effects=[f"`{branch}` will point at the current commit.", "The current branch will not change."],
             preview_steps=[f"Create a new branch label `{branch}` at {start}."],
+            state_fingerprint=state_fingerprint(state),
+        )
+
+    def create_and_switch_branch_at_commit(self, state: RepositoryState, commit: Commit, branch: str) -> CommandPlan:
+        branch = branch.strip()
+        if not branch:
+            raise ValueError("Enter a branch name.")
+        if any(ref.name == branch and ref.kind == "local_branch" for ref in state.references):
+            raise ValueError("A local branch with that name already exists.")
+        return CommandPlan(
+            title=f"Create and switch to {branch}",
+            explanation=f"Create a new local branch named `{branch}` at commit `{commit.short_oid}` and make it current.",
+            steps=[
+                CommandStep(
+                    ["git", "switch", "-c", branch, commit.oid],
+                    "Create the branch at the selected commit and switch to it.",
+                )
+            ],
+            expected_effects=[
+                f"`{branch}` points to `{commit.short_oid}`.",
+                f"HEAD attaches to `{branch}`.",
+                "Git may refuse if local changes would be overwritten.",
+            ],
+            preview_steps=[
+                f"Attach a new branch label `{branch}` to commit `{commit.short_oid}`.",
+                f"Move HEAD to `{branch}`.",
+            ],
             state_fingerprint=state_fingerprint(state),
         )
 
