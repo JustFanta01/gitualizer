@@ -119,6 +119,9 @@ def test_drag_remote_tracking_onto_local_branch_offers_pull_strategy() -> None:
     assert plan.steps[0].args == ["git", "switch", "main"]
     assert plan.steps[1].args == ["git", "fetch", "origin"]
     assert plan.steps[2].args == ["git", "rebase", "origin/main"]
+    assert plan.graph_preview[0] == "Before:"
+    assert "main" in "\n".join(plan.graph_preview)
+    assert "origin/main" in "\n".join(plan.graph_preview)
     assert plan.history_rewrite is True
 
 
@@ -131,6 +134,7 @@ def test_drag_local_branch_onto_local_branch_can_merge() -> None:
 
     assert plan.steps[0].args == ["git", "switch", "main"]
     assert plan.steps[1].args == ["git", "merge", "feature"]
+    assert "new merge commit on target branch" in "\n".join(plan.graph_preview)
 
 
 def test_drag_staging_area_onto_branch_creates_commit_plan() -> None:
@@ -211,3 +215,45 @@ def test_commit_trash_can_revert_or_drop_from_current_branch() -> None:
     assert revert.steps[1].args == ["git", "revert", "--no-edit", "b" * 40]
     assert drop.steps[1].args == ["git", "rebase", "--onto", "a" * 40, "b" * 40, "main"]
     assert drop.history_rewrite is True
+
+
+def test_graph_changing_plans_have_graph_previews() -> None:
+    repo_state = state()
+    planner = OperationPlanner()
+    target = Commit("c" * 40, "c" * 12, ("a" * 40,), "A", "a@example.invalid", "2024-01-01T00:00:00+00:00", "target")
+    source = Commit("b" * 40, "b" * 12, ("a" * 40,), "A", "a@example.invalid", "2024-01-01T00:00:00+00:00", "source")
+    remote = Reference(
+        name="origin/main",
+        full_name="refs/remotes/origin/main",
+        target="c" * 40,
+        kind="remote_tracking",
+    )
+    main = repo_state.local_branches[0]
+    feature = repo_state.local_branches[1]
+
+    graph_plans = [
+        planner.switch_branch(repo_state, "feature"),
+        planner.switch_to_commit(repo_state, target),
+        planner.create_branch(repo_state, "new-branch"),
+        planner.create_and_switch_branch_at_commit(repo_state, target, "try-here"),
+        planner.commit(repo_state, "Save staged file"),
+        planner.commit_to_branch(repo_state, "feature", "Save staged work"),
+        planner.fetch(repo_state, "origin"),
+        planner.fast_forward_current_branch(repo_state),
+        planner.push_current_branch(repo_state),
+        planner.push_branch_to_remote_tracking(repo_state, main, remote),
+        planner.integrate_remote_tracking(repo_state, remote, main, "ff"),
+        planner.integrate_remote_tracking(repo_state, remote, main, "merge"),
+        planner.integrate_remote_tracking(repo_state, remote, main, "rebase"),
+        planner.integrate_local_branch(repo_state, feature, main, "merge_source_into_target"),
+        planner.integrate_local_branch(repo_state, feature, main, "rebase_source_onto_target"),
+        planner.replay_commit_after(repo_state, source, target),
+        planner.create_branch_at_commit(repo_state, target, "recover-here"),
+        planner.cherry_pick_commit_to_branch(repo_state, source, main),
+        planner.revert_commit_on_branch(repo_state, source, main),
+        planner.drop_commit_from_current_branch(repo_state, source),
+        planner.reset_branch_to_commit(repo_state, main, target, "mixed"),
+    ]
+
+    assert all(plan.graph_preview for plan in graph_plans)
+    assert planner.stage_paths(repo_state, [FileChange(path="edited.txt", area="working_tree", code="M")]).graph_preview == []

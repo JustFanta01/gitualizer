@@ -34,6 +34,7 @@ class OperationPlanner:
             steps=[CommandStep(["git", "switch", branch], "Switch to the selected local branch.")],
             expected_effects=[f"HEAD moves to `{branch}`.", "Git may refuse if local changes would be overwritten."],
             preview_steps=[f"HEAD detaches from `{state.head.branch or 'current position'}`.", f"HEAD attaches to `{branch}`."],
+            graph_preview=_head_move_graph_preview(state.head.branch or state.head.short_oid or "current", branch),
             state_fingerprint=state_fingerprint(state),
         )
 
@@ -57,6 +58,7 @@ class OperationPlanner:
                 f"Place HEAD on commit `{commit.short_oid}`.",
                 "Leave all branch labels where they are.",
             ],
+            graph_preview=_detached_head_graph_preview(state.head.branch or state.head.short_oid or "current", commit.short_oid),
             state_fingerprint=state_fingerprint(state),
         )
 
@@ -73,6 +75,7 @@ class OperationPlanner:
             steps=[CommandStep(["git", "branch", branch], "Create the branch without switching to it.")],
             expected_effects=[f"`{branch}` will point at the current commit.", "The current branch will not change."],
             preview_steps=[f"Create a new branch label `{branch}` at {start}."],
+            graph_preview=_branch_label_graph_preview(state.head.branch or state.head.short_oid or "HEAD", branch, start),
             state_fingerprint=state_fingerprint(state),
         )
 
@@ -100,6 +103,7 @@ class OperationPlanner:
                 f"Attach a new branch label `{branch}` to commit `{commit.short_oid}`.",
                 f"Move HEAD to `{branch}`.",
             ],
+            graph_preview=_branch_label_graph_preview(commit.short_oid, branch, commit.short_oid, head_moves=True),
             state_fingerprint=state_fingerprint(state),
         )
 
@@ -192,6 +196,7 @@ class OperationPlanner:
             steps=[CommandStep(["git", "commit", "-m", message], "Commit staged changes with the provided message.")],
             expected_effects=["A new commit will be created.", "The current branch will move to that commit."],
             preview_steps=["Create a new commit node from the index.", f"Move `{state.head.branch or 'HEAD'}` to the new commit."],
+            graph_preview=_new_commit_graph_preview(state.head.branch or "HEAD"),
             state_fingerprint=state_fingerprint(state),
         )
 
@@ -221,6 +226,7 @@ class OperationPlanner:
                 "Create a new commit node from the staging area.",
                 f"Move `{branch}` to the new commit.",
             ],
+            graph_preview=_new_commit_graph_preview(branch),
             state_fingerprint=state_fingerprint(state),
         )
 
@@ -234,6 +240,7 @@ class OperationPlanner:
             steps=[CommandStep(["git", "fetch", remote], f"Fetch objects and update `{remote}/...` tracking refs.")],
             expected_effects=["Remote-tracking branches may move.", "Local branches are not modified by fetch."],
             preview_steps=[f"Update local remote-tracking refs for `{remote}`.", "Do not move local branch labels."],
+            graph_preview=_remote_tracking_graph_preview(f"{remote}/branch", "fetch"),
             remote_impact="Reads from remote; does not write to it.",
             state_fingerprint=state_fingerprint(state),
         )
@@ -257,6 +264,7 @@ class OperationPlanner:
                 f"If possible, move `{current.name}` forward to `{current.upstream}`.",
                 "No merge commit is created.",
             ],
+            graph_preview=_integration_graph_preview(current.name, current.upstream, "ff"),
             state_fingerprint=state_fingerprint(state),
         )
 
@@ -273,6 +281,7 @@ class OperationPlanner:
             steps=[CommandStep(["git", "push", remote, current.name], "Push the current branch to its upstream remote.")],
             expected_effects=["The remote branch may move forward if the push is a fast-forward."],
             preview_steps=[f"Move the remote branch for `{current.name}` to the local branch tip if the remote accepts it."],
+            graph_preview=_push_graph_preview(current.name, current.upstream),
             warnings=["Git will reject this push if it is not a fast-forward."],
             remote_impact=f"May update `{current.upstream}` on `{remote}`.",
             state_fingerprint=state_fingerprint(state),
@@ -306,6 +315,7 @@ class OperationPlanner:
                 f"If the remote accepts the update, move `{remote}:{remote_branch}` to `{local_ref.name}`.",
                 f"Refresh the local remote-tracking label `{remote_ref.name}`.",
             ],
+            graph_preview=_push_graph_preview(local_ref.name, remote_ref.name),
             warnings=[
                 "Git will reject this push if it is not a fast-forward.",
                 "If history was rewritten, use an explicit force-with-lease workflow instead of this normal push.",
@@ -358,6 +368,7 @@ class OperationPlanner:
                     f"Move `{local_ref.name}` to the copied commits.",
                     "Old copied commits may become unreferenced.",
                 ],
+                graph_preview=_integration_graph_preview(local_ref.name, remote_ref.name, "rebase"),
                 warnings=["This rewrites local branch history."],
                 history_rewrite=True,
                 remote_impact="Reads from remote; does not write to it.",
@@ -379,6 +390,7 @@ class OperationPlanner:
                 f"Attach HEAD to `{local_ref.name}`.",
                 f"Integrate `{remote_ref.name}` into `{local_ref.name}`.",
             ],
+            graph_preview=_integration_graph_preview(local_ref.name, remote_ref.name, strategy),
             remote_impact="Reads from remote; does not write to it.",
             state_fingerprint=state_fingerprint(state),
         )
@@ -406,6 +418,7 @@ class OperationPlanner:
                     f"Merge `{source_ref.name}` into `{target_ref.name}`.",
                     "Create a merge commit if fast-forward is not possible.",
                 ],
+                graph_preview=_integration_graph_preview(target_ref.name, source_ref.name, "merge"),
                 state_fingerprint=state_fingerprint(state),
             )
         if strategy == "rebase_source_onto_target":
@@ -425,6 +438,7 @@ class OperationPlanner:
                     f"Replay commits unique to `{source_ref.name}` after `{target_ref.name}`.",
                     f"Move `{source_ref.name}` to the rewritten commits.",
                 ],
+                graph_preview=_integration_graph_preview(source_ref.name, target_ref.name, "rebase"),
                 warnings=["This rewrites local branch history."],
                 history_rewrite=True,
                 state_fingerprint=state_fingerprint(state),
@@ -457,6 +471,7 @@ class OperationPlanner:
                 f"Cherry-pick `{source.short_oid}` onto the new branch.",
                 "Show conflicts if Git cannot apply the patch cleanly.",
             ],
+            graph_preview=_replay_commit_graph_preview(source.short_oid, target.short_oid, branch),
             warnings=["Cherry-pick may stop for conflicts. If it does, Gitualizer will show the command failure and refreshed state."],
             state_fingerprint=state_fingerprint(state),
         )
@@ -473,6 +488,7 @@ class OperationPlanner:
             steps=[CommandStep(["git", "branch", branch, commit.oid], "Create the branch at the selected commit.")],
             expected_effects=[f"`{branch}` points to `{commit.short_oid}`.", "HEAD does not move."],
             preview_steps=[f"Attach a new branch label `{branch}` to commit `{commit.short_oid}`."],
+            graph_preview=_branch_label_graph_preview(commit.short_oid, branch, commit.short_oid),
             state_fingerprint=state_fingerprint(state),
         )
 
@@ -491,6 +507,7 @@ class OperationPlanner:
                 f"Attach HEAD to `{branch.name}`.",
                 f"Create a new commit on `{branch.name}` with the patch from `{source.short_oid}`.",
             ],
+            graph_preview=_copy_commit_to_branch_graph_preview(source.short_oid, branch.name, "cherry-pick"),
             warnings=["Cherry-pick may stop for conflicts."],
             state_fingerprint=state_fingerprint(state),
         )
@@ -510,6 +527,7 @@ class OperationPlanner:
                 f"Attach HEAD to `{branch.name}`.",
                 f"Create a new commit that applies the inverse patch of `{source.short_oid}`.",
             ],
+            graph_preview=_copy_commit_to_branch_graph_preview(source.short_oid, branch.name, "revert"),
             warnings=["Revert may stop for conflicts."],
             state_fingerprint=state_fingerprint(state),
         )
@@ -549,6 +567,7 @@ class OperationPlanner:
                 f"Copy descendants of `{source.short_oid}` onto that parent.",
                 f"Move `{current.name}` to the rewritten commits.",
             ],
+            graph_preview=_drop_commit_graph_preview(current.name, source.short_oid),
             warnings=[
                 "This rewrites branch history.",
                 "If this branch was pushed, pushing afterward may require force-with-lease.",
@@ -576,6 +595,7 @@ class OperationPlanner:
                 f"Move the `{branch.name}` label to `{commit.short_oid}`.",
                 _reset_mode_preview(mode),
             ],
+            graph_preview=_reset_branch_graph_preview(branch.name, commit.short_oid, mode),
             warnings=[_reset_mode_warning(mode)] if destructive else [_reset_mode_preview(mode)],
             destructive=destructive,
             history_rewrite=True,
@@ -612,3 +632,167 @@ def _reset_mode_warning(mode: str) -> str:
     if mode == "hard":
         return "Hard reset discards uncommitted working tree and index changes."
     return _reset_mode_preview(mode)
+
+
+def _head_move_graph_preview(before: str, after: str) -> list[str]:
+    return [
+        "Before:",
+        f"  o---A  {before}, HEAD",
+        f"  o---B  {after}",
+        "",
+        "After:",
+        f"  o---A  {before}",
+        f"  o---B  {after}, HEAD",
+        "       ^ highlighted: HEAD attaches to this branch",
+    ]
+
+
+def _detached_head_graph_preview(before: str, commit: str) -> list[str]:
+    return [
+        "Before:",
+        f"  o---A  {before}, HEAD",
+        f"       \\",
+        f"        B  {commit}",
+        "",
+        "After:",
+        f"  o---A  {before}",
+        f"       \\",
+        f"        B  HEAD detached at {commit}",
+        "        ^ highlighted: HEAD points directly at this commit",
+    ]
+
+
+def _branch_label_graph_preview(anchor: str, branch: str, commit: str, *, head_moves: bool = False) -> list[str]:
+    head = ", HEAD" if head_moves else ""
+    return [
+        "Before:",
+        f"  o---A  {anchor}",
+        "",
+        "After:",
+        f"  o---A  {anchor}, {branch}{head}",
+        f"       ^ highlighted: new branch label at {commit}",
+    ]
+
+
+def _new_commit_graph_preview(branch: str) -> list[str]:
+    return [
+        "Before:",
+        f"  o---A  {branch}, HEAD",
+        "",
+        "After:",
+        f"  o---A---N  {branch}, HEAD",
+        "          ^ highlighted: new commit from the index",
+    ]
+
+
+def _remote_tracking_graph_preview(remote_ref: str, action: str) -> list[str]:
+    return [
+        "Before:",
+        f"  o---A  {remote_ref}",
+        "",
+        "After:",
+        f"  o---A---B  {remote_ref}",
+        f"          ^ highlighted: {action} may move this remote-tracking label",
+    ]
+
+
+def _push_graph_preview(local_branch: str, remote_ref: str) -> list[str]:
+    return [
+        "Before:",
+        f"  o---A  {remote_ref}",
+        f"       \\",
+        f"        B  {local_branch}",
+        "",
+        "After:",
+        f"  o---A---B  {local_branch}, {remote_ref}",
+        "          ^ highlighted: remote branch catches up to local branch",
+    ]
+
+
+def _integration_graph_preview(target_branch: str, source_branch: str, strategy: str) -> list[str]:
+    if strategy == "ff":
+        return [
+            "Before:",
+            f"  o---A  {target_branch}",
+            f"       \\",
+            f"        B---C  {source_branch}",
+            "",
+            "After:",
+            f"  o---A---B---C  {target_branch}, {source_branch}",
+            "          ^^^^^ highlighted: target branch label moves forward",
+        ]
+    if strategy == "merge":
+        return [
+            "Before:",
+            f"  o---A  {target_branch}",
+            f"       \\",
+            f"        B---C  {source_branch}",
+            "",
+            "After:",
+            f"  o---A-------M  {target_branch}",
+            f"       \\     /",
+            f"        B---C  {source_branch}",
+            "          ^^^ highlighted: new merge commit on target branch",
+        ]
+    if strategy == "rebase":
+        return [
+            "Before:",
+            f"  o---A  {source_branch}",
+            f"       \\",
+            f"        B---C  {target_branch}",
+            "",
+            "After:",
+            f"  o---B---C---A'  {source_branch}",
+            f"      {target_branch}",
+            "          ^^^^^ highlighted: source branch is replayed and rewritten",
+        ]
+    return []
+
+
+def _replay_commit_graph_preview(source_commit: str, target_commit: str, branch: str) -> list[str]:
+    return [
+        "Before:",
+        f"  o---A---{target_commit}",
+        f"  o---B---{source_commit}",
+        "",
+        "After:",
+        f"  o---A---{target_commit}---N  {branch}, HEAD",
+        f"                 ^ highlighted: copied change from {source_commit}",
+    ]
+
+
+def _copy_commit_to_branch_graph_preview(source_commit: str, branch: str, action: str) -> list[str]:
+    label = "copied change" if action == "cherry-pick" else "revert commit"
+    return [
+        "Before:",
+        f"  o---A  {branch}, HEAD",
+        f"  o---B  {source_commit}",
+        "",
+        "After:",
+        f"  o---A---N  {branch}, HEAD",
+        f"          ^ highlighted: new {label} for {source_commit}",
+    ]
+
+
+def _drop_commit_graph_preview(branch: str, commit: str) -> list[str]:
+    return [
+        "Before:",
+        f"  o---A---{commit}---C  {branch}, HEAD",
+        "",
+        "After:",
+        f"  o---A---C'  {branch}, HEAD",
+        f"      xxx highlighted: {commit} is removed and descendants are rewritten",
+    ]
+
+
+def _reset_branch_graph_preview(branch: str, commit: str, mode: str) -> list[str]:
+    return [
+        "Before:",
+        f"  o---A---B  {branch}, HEAD",
+        f"      {commit}",
+        "",
+        "After:",
+        f"  o---A  {branch}, HEAD",
+        f"      ^ highlighted: branch label moves to {commit}",
+        f"      working tree/index behavior: reset --{mode}",
+    ]

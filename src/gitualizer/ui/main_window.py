@@ -885,9 +885,11 @@ def _render_plan_html(plan: CommandPlan, details_open: bool) -> str:
             "Open the confirmation details to inspect expected effects, warnings, and impact.</div>"
         )
     preview = _preview_steps_html(plan)
+    graph_preview = _graph_preview_html(plan)
     return f"""
     <h2 style="color:#1f2933;">{html.escape(plan.title)}</h2>
     <p>{html.escape(plan.explanation)}</p>
+    {graph_preview}
     {preview}
     {command_block}
     {details}
@@ -926,6 +928,18 @@ def _preview_steps_html(plan: CommandPlan) -> str:
     """
 
 
+def _graph_preview_html(plan: CommandPlan) -> str:
+    if not plan.graph_preview:
+        return ""
+    text = html.escape("\n".join(plan.graph_preview))
+    return f"""
+    <div style="background:#fffdf2; border:1px solid #eac54f; border-radius:6px; padding:8px; margin:8px 0;">
+      <b>Proposed graph shape</b>
+      <pre style="margin:6px 0 0 0; color:#1f2933; font-family:JetBrains Mono, DejaVu Sans Mono, monospace;">{text}</pre>
+    </div>
+    """
+
+
 def _render_plan_text(plan: CommandPlan) -> str:
     lines = [
         plan.title,
@@ -939,6 +953,8 @@ def _render_plan_text(plan: CommandPlan) -> str:
         f"Destructive: {'YES' if plan.destructive else 'NO'}",
         f"Remote impact: {plan.remote_impact}",
     ]
+    if plan.graph_preview:
+        lines.extend(["", "Proposed graph shape:", *plan.graph_preview])
     if plan.expected_effects:
         lines.extend(["", "Expected effects:", *[f"- {effect}" for effect in plan.expected_effects]])
     if plan.preview_steps:
