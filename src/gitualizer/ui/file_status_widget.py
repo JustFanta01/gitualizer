@@ -22,9 +22,10 @@ class ChangeListWidget(QListWidget):
         self.area = area
         self.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
         self.setDragEnabled(True)
-        self.setAcceptDrops(area == "working")
+        self.setAcceptDrops(True)
         self.setDefaultDropAction(Qt.DropAction.MoveAction)
         self.setAlternatingRowColors(True)
+        self.setProperty("dropActive", False)
 
     def changes(self) -> list[FileChange]:
         items = [self.item(index) for index in range(self.count())]
@@ -54,10 +55,8 @@ class ChangeListWidget(QListWidget):
         drag.exec(Qt.DropAction.MoveAction)
 
     def dragEnterEvent(self, event) -> None:  # noqa: N802
-        if self.area == "working":
-            event.ignore()
-            return
         if event.mimeData().hasFormat(CHANGE_MIME):
+            self._set_drop_active(True)
             event.acceptProposedAction()
             return
         event.ignore()
@@ -65,8 +64,13 @@ class ChangeListWidget(QListWidget):
     def dragMoveEvent(self, event) -> None:  # noqa: N802
         self.dragEnterEvent(event)
 
+    def dragLeaveEvent(self, event) -> None:  # noqa: N802
+        self._set_drop_active(False)
+        super().dragLeaveEvent(event)
+
     def dropEvent(self, event) -> None:  # noqa: N802
-        if self.area != "staged" or not event.mimeData().hasFormat(CHANGE_MIME):
+        self._set_drop_active(False)
+        if not event.mimeData().hasFormat(CHANGE_MIME):
             event.ignore()
             return
         changes = decode_changes(event.mimeData().data(CHANGE_MIME))
@@ -76,22 +80,33 @@ class ChangeListWidget(QListWidget):
             return
         event.ignore()
 
+    def _set_drop_active(self, active: bool) -> None:
+        self.setProperty("dropActive", active)
+        self.style().unpolish(self)
+        self.style().polish(self)
+
 
 class FileStatusWidget(QWidget):
     changesDroppedToStage = Signal(object)
+    changesDroppedToWorking = Signal(object)
+    changesDroppedToTrash = Signal(object)
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.working_list = ChangeListWidget("working")
         self.staged_list = ChangeListWidget("staged")
+        self.trash_zone = DropZone("Trash")
         self.staged_list.setAcceptDrops(True)
         self.staged_list.changesDropped.connect(lambda changes: self.changesDroppedToStage.emit(changes))
+        self.working_list.changesDropped.connect(lambda changes: self.changesDroppedToWorking.emit(changes))
+        self.trash_zone.changesDropped.connect(lambda changes: self.changesDroppedToTrash.emit(changes))
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
         layout.addWidget(self._column("Working Tree", self.working_list))
         layout.addWidget(self._column("Staging Area / Index", self.staged_list))
+        layout.addWidget(self._column("Trash", self.trash_zone))
 
     def set_changes(self, changes: list[FileChange]) -> None:
         self.working_list.clear()
@@ -105,7 +120,7 @@ class FileStatusWidget(QWidget):
     def dropEvent(self, event) -> None:  # noqa: N802
         event.ignore()
 
-    def _column(self, title: str, list_widget: ChangeListWidget) -> QWidget:
+    def _column(self, title: str, list_widget: QWidget) -> QWidget:
         widget = QWidget()
         layout = QVBoxLayout(widget)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -123,6 +138,49 @@ class FileStatusWidget(QWidget):
         item = QListWidgetItem(label)
         item.setData(Qt.ItemDataRole.UserRole, change)
         list_widget.addItem(item)
+
+
+class DropZone(QLabel):
+    changesDropped = Signal(object)
+
+    def __init__(self, text: str, parent: Optional[QWidget] = None) -> None:
+        super().__init__(text, parent)
+        self.setObjectName("dropZone")
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setAcceptDrops(True)
+        self.setMinimumWidth(82)
+        self.setProperty("dropActive", False)
+
+    def dragEnterEvent(self, event) -> None:  # noqa: N802
+        if event.mimeData().hasFormat(CHANGE_MIME):
+            self._set_drop_active(True)
+            event.acceptProposedAction()
+            return
+        event.ignore()
+
+    def dragMoveEvent(self, event) -> None:  # noqa: N802
+        self.dragEnterEvent(event)
+
+    def dragLeaveEvent(self, event) -> None:  # noqa: N802
+        self._set_drop_active(False)
+        super().dragLeaveEvent(event)
+
+    def dropEvent(self, event) -> None:  # noqa: N802
+        self._set_drop_active(False)
+        if not event.mimeData().hasFormat(CHANGE_MIME):
+            event.ignore()
+            return
+        changes = decode_changes(event.mimeData().data(CHANGE_MIME))
+        if changes:
+            self.changesDropped.emit(changes)
+            event.acceptProposedAction()
+            return
+        event.ignore()
+
+    def _set_drop_active(self, active: bool) -> None:
+        self.setProperty("dropActive", active)
+        self.style().unpolish(self)
+        self.style().polish(self)
 
 
 def decode_changes(data: QByteArray) -> list[FileChange]:

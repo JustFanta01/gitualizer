@@ -21,6 +21,7 @@ class CommitNode:
 class CommitGraphWidget(QWidget):
     referenceDropped = Signal(object, object)
     stageDroppedOnBranch = Signal(object)
+    commitDroppedOnCommit = Signal(object, object)
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -28,8 +29,13 @@ class CommitGraphWidget(QWidget):
         self._preview_plan: Optional[CommandPlan] = None
         self._nodes: dict[str, CommitNode] = {}
         self._ref_hitboxes: list[tuple[QRectF, Reference]] = []
+        self._commit_hitboxes: list[tuple[QRectF, Commit]] = []
         self._drag_ref: Optional[Reference] = None
+        self._drag_commit: Optional[Commit] = None
         self._drag_pos: Optional[QPoint] = None
+        self._hover_ref: Optional[Reference] = None
+        self._hover_commit: Optional[Commit] = None
+        self._external_stage_drag = False
         self._row_spacing = 64
         self._lane_spacing = 88
         self.setMinimumSize(420, 340)
@@ -83,6 +89,7 @@ class CommitGraphWidget(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.fillRect(self.rect(), QColor("#ffffff"))
         self._ref_hitboxes = []
+        self._commit_hitboxes = []
         self._draw_grid(painter)
         if self._state is None:
             self._draw_empty(painter, "Open a Git repository to inspect it.")
@@ -206,6 +213,7 @@ class CommitGraphWidget(QWidget):
             node = self._nodes.get(commit.oid)
             if node is None:
                 continue
+            self._commit_hitboxes.append((QRectF(node.x - 13, node.y - 13, 26, 26), commit))
             is_head = self._state.head.oid == commit.oid
             fill = QColor("#1f6feb") if is_head else QColor("#26313d")
             if is_head:
@@ -239,17 +247,25 @@ class CommitGraphWidget(QWidget):
             rect = QRectF(x + offset, y, width, 22)
             if ref.kind != "head":
                 self._ref_hitboxes.append((rect, ref))
-            painter.setPen(QPen(color, 1))
-            painter.setBrush(QColor(color.red(), color.green(), color.blue(), 28))
+            is_target = self._hover_ref is not None and self._hover_ref.full_name == ref.full_name
+            is_possible = self._is_possible_ref_drop(ref)
+            painter.setPen(QPen(color, 2 if is_target or is_possible else 1))
+            alpha = 78 if is_target else (48 if is_possible else 28)
+            painter.setBrush(QColor(color.red(), color.green(), color.blue(), alpha))
             painter.drawRoundedRect(rect, 6, 6)
             painter.setPen(color)
             painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
             offset += width + 6
 
     def _draw_drag(self, painter: QPainter) -> None:
-        if self._drag_ref is None or self._drag_pos is None:
+        if self._drag_pos is None:
             return
-        text = self._drag_ref.name
+        if self._drag_ref is not None:
+            text = self._drag_ref.name
+        elif self._drag_commit is not None:
+            text = self._drag_commit.short_oid
+        else:
+            return
         painter.setFont(QFont("Sans Serif", 8, QFont.Weight.Bold))
         width = painter.fontMetrics().horizontalAdvance(text) + 18
         rect = QRectF(self._drag_pos.x() + 12, self._drag_pos.y() + 12, width, 24)
@@ -258,6 +274,17 @@ class CommitGraphWidget(QWidget):
         painter.drawRoundedRect(rect, 6, 6)
         painter.setPen(QColor("#1f6feb"))
         painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
+
+    def _is_possible_ref_drop(self, ref: Reference) -> bool:
+        if self._external_stage_drag:
+            return ref.kind == "local_branch"
+        if self._drag_ref is None:
+            return False
+        if self._drag_ref.kind == "remote_tracking":
+            return ref.kind == "local_branch"
+        if self._drag_ref.kind == "local_branch":
+            return ref.kind == "local_branch" and ref.full_name != self._drag_ref.full_name
+        return False
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
         if event.button() != Qt.MouseButton.LeftButton:
@@ -269,11 +296,23 @@ class CommitGraphWidget(QWidget):
             self._drag_pos = event.position().toPoint()
             self.update()
             return
+        commit = self._commit_at(event.position().toPoint())
+        if commit is not None:
+            self._drag_commit = commit
+            self._drag_pos = event.position().toPoint()
+            self.update()
+            return
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
         if self._drag_ref is not None:
             self._drag_pos = event.position().toPoint()
+            self._hover_ref = self._reference_at(event.position().toPoint())
+            self.update()
+            return
+        if self._drag_commit is not None:
+            self._drag_pos = event.position().toPoint()
+            self._hover_commit = self._commit_at(event.position().toPoint())
             self.update()
             return
         if self._reference_at(event.position().toPoint()) is not None:
@@ -283,18 +322,44 @@ class CommitGraphWidget(QWidget):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
-        if self._drag_ref is None:
+        if self._drag_ref is None and self._drag_commit is None:
             super().mouseReleaseEvent(event)
             return
-        source = self._drag_ref
+        source_ref = self._drag_ref
+        source_commit = self._drag_commit
         self._drag_ref = None
+        self._drag_commit = None
         self._drag_pos = None
-        target = self._reference_at(event.position().toPoint())
+        self._hover_ref = None
+        self._hover_commit = None
         self.update()
-        if target is not None and target.name != source.name:
-            self.referenceDropped.emit(source, target)
-            return
+        if source_ref is not None:
+            target = self._reference_at(event.position().toPoint())
+            if target is not None and target.name != source_ref.name:
+                self.referenceDropped.emit(source_ref, target)
+                return
+        if source_commit is not None:
+            target_commit = self._commit_at(event.position().toPoint())
+            if target_commit is not None and target_commit.oid != source_commit.oid:
+                self.commitDroppedOnCommit.emit(source_commit, target_commit)
+                return
         super().mouseReleaseEvent(event)
+
+    def _commit_at(self, pos: QPoint) -> Optional[Commit]:
+        for rect, commit in reversed(self._commit_hitboxes):
+            if rect.contains(pos):
+                return commit
+        return None
+
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        self._hover_ref = None
+        self._hover_commit = None
+        super().leaveEvent(event)
+
+    def _set_external_stage_drag(self, active: bool, pos: Optional[QPoint] = None) -> None:
+        self._external_stage_drag = active
+        self._hover_ref = self._reference_at(pos) if active and pos is not None else None
+        self.update()
 
     def _reference_at(self, pos: QPoint) -> Optional[Reference]:
         for rect, ref in reversed(self._ref_hitboxes):
@@ -304,21 +369,29 @@ class CommitGraphWidget(QWidget):
 
     def dragEnterEvent(self, event) -> None:  # noqa: N802
         if event.mimeData().hasFormat("application/x-gitualizer-stage"):
+            self._set_external_stage_drag(True, event.position().toPoint())
             event.acceptProposedAction()
             return
         event.ignore()
 
     def dragMoveEvent(self, event) -> None:  # noqa: N802
         if event.mimeData().hasFormat("application/x-gitualizer-stage"):
+            self._set_external_stage_drag(True, event.position().toPoint())
             event.acceptProposedAction()
             return
         event.ignore()
 
+    def dragLeaveEvent(self, event) -> None:  # noqa: N802
+        self._set_external_stage_drag(False)
+        super().dragLeaveEvent(event)
+
     def dropEvent(self, event) -> None:  # noqa: N802
         if not event.mimeData().hasFormat("application/x-gitualizer-stage"):
+            self._set_external_stage_drag(False)
             event.ignore()
             return
         target = self._reference_at(event.position().toPoint())
+        self._set_external_stage_drag(False)
         if target is None or target.kind != "local_branch":
             event.ignore()
             return

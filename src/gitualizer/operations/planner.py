@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 from typing import Optional
 
-from gitualizer.model.repository_state import FileChange, Reference, RepositoryState
+from gitualizer.model.repository_state import Commit, FileChange, Reference, RepositoryState
 from gitualizer.operations.command_plan import CommandPlan, CommandStep
 
 
@@ -94,6 +94,32 @@ class OperationPlanner:
             explanation="Move the selected staged paths back out of the index.",
             steps=[CommandStep(["git", "restore", "--staged", "--", *paths], "Unstage only the selected paths.")],
             expected_effects=["Selected files move from Staging Area back to Working Tree."],
+            state_fingerprint=state_fingerprint(state),
+        )
+
+    def discard_changes(self, state: RepositoryState, changes: list[FileChange]) -> CommandPlan:
+        paths = _paths_for_changes(changes)
+        if not paths:
+            raise ValueError("Drag one or more changed files to the trash.")
+        tracked_paths = _paths_for_changes([change for change in changes if change.area != "untracked"])
+        untracked_paths = _paths_for_changes([change for change in changes if change.area == "untracked"])
+        steps: list[CommandStep] = []
+        if tracked_paths:
+            steps.append(
+                CommandStep(
+                    ["git", "restore", "--staged", "--worktree", "--", *tracked_paths],
+                    "Discard tracked staged and working-tree changes.",
+                )
+            )
+        if untracked_paths:
+            steps.append(CommandStep(["git", "clean", "-f", "--", *untracked_paths], "Remove untracked files."))
+        return CommandPlan(
+            title="Discard selected changes",
+            explanation="Remove the selected changes from the working tree and/or index.",
+            steps=steps,
+            expected_effects=["Selected file changes disappear from the working tree and index."],
+            warnings=["This is destructive. Discarded uncommitted file contents may not be recoverable from Git."],
+            destructive=True,
             state_fingerprint=state_fingerprint(state),
         )
 
@@ -277,6 +303,31 @@ class OperationPlanner:
                 state_fingerprint=state_fingerprint(state),
             )
         raise ValueError("Unknown branch integration strategy.")
+
+    def replay_commit_after(self, state: RepositoryState, source: Commit, target: Commit) -> CommandPlan:
+        if source.oid == target.oid:
+            raise ValueError("Drag a commit onto a different commit.")
+        branch = f"gitualizer/replay-{source.short_oid}-after-{target.short_oid}"
+        if any(ref.name == branch for ref in state.local_branches):
+            branch = f"{branch}-new"
+        return CommandPlan(
+            title=f"Replay {source.short_oid} after {target.short_oid}",
+            explanation=(
+                "Create a new branch at the target commit, then cherry-pick the dragged commit onto it. "
+                "This is a safe previewable way to construct the requested history shape without moving existing branches."
+            ),
+            steps=[
+                CommandStep(["git", "switch", "-c", branch, target.oid], f"Create `{branch}` at the target commit."),
+                CommandStep(["git", "cherry-pick", source.oid], "Replay the dragged commit onto the new branch."),
+            ],
+            expected_effects=[
+                f"A new branch `{branch}` will be created at `{target.short_oid}`.",
+                f"A new commit equivalent to `{source.short_oid}` may be created after `{target.short_oid}`.",
+                "Existing branches are not moved by this plan.",
+            ],
+            warnings=["Cherry-pick may stop for conflicts. If it does, Gitualizer will show the command failure and refreshed state."],
+            state_fingerprint=state_fingerprint(state),
+        )
 
 
 def _current_branch_ref(state: RepositoryState) -> Optional[Reference]:

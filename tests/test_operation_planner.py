@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from gitualizer.model.repository_state import FileChange, HeadState, Reference, RepositoryState
+from gitualizer.model.repository_state import Commit, FileChange, HeadState, Reference, RepositoryState
 from gitualizer.operations.planner import OperationPlanner
 
 
@@ -103,3 +103,28 @@ def test_drag_staging_area_onto_branch_creates_commit_plan() -> None:
 
     assert plan.steps[0].args == ["git", "switch", "feature"]
     assert plan.steps[1].args == ["git", "commit", "-m", "Save staged work"]
+
+
+def test_drag_changes_to_trash_creates_destructive_discard_plan() -> None:
+    plan = OperationPlanner().discard_changes(
+        state(),
+        [
+            FileChange(path="edited.txt", area="working_tree", code="M"),
+            FileChange(path="new.txt", area="untracked", code="??"),
+        ],
+    )
+
+    assert plan.destructive is True
+    assert plan.steps[0].args == ["git", "restore", "--staged", "--worktree", "--", "edited.txt"]
+    assert plan.steps[1].args == ["git", "clean", "-f", "--", "new.txt"]
+
+
+def test_drag_commit_onto_commit_creates_replay_branch_plan() -> None:
+    repo_state = state()
+    source = Commit("b" * 40, "b" * 12, tuple(), "A", "a@example.invalid", "2024-01-01T00:00:00+00:00", "source")
+    target = Commit("c" * 40, "c" * 12, tuple(), "A", "a@example.invalid", "2024-01-01T00:00:00+00:00", "target")
+
+    plan = OperationPlanner().replay_commit_after(repo_state, source, target)
+
+    assert plan.steps[0].args == ["git", "switch", "-c", "gitualizer/replay-bbbbbbbbbbbb-after-cccccccccccc", "c" * 40]
+    assert plan.steps[1].args == ["git", "cherry-pick", "b" * 40]

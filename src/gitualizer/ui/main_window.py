@@ -33,7 +33,7 @@ from PySide6.QtWidgets import (
 
 from gitualizer.git.repository import RepositoryReader
 from gitualizer.git.runner import GitError
-from gitualizer.model.repository_state import FileChange, Reference, RepositoryState
+from gitualizer.model.repository_state import Commit, FileChange, Reference, RepositoryState
 from gitualizer.operations.command_plan import CommandPlan, ExecutionResult
 from gitualizer.operations.executor import CommandExecutor
 from gitualizer.operations.planner import OperationPlanner, state_fingerprint
@@ -122,7 +122,10 @@ class MainWindow(QMainWindow):
         self.path_edit.returnPressed.connect(self.refresh)
         self.graph.referenceDropped.connect(self._handle_reference_drop)
         self.graph.stageDroppedOnBranch.connect(self._handle_stage_drop_on_branch)
+        self.graph.commitDroppedOnCommit.connect(self._handle_commit_drop_on_commit)
         self.file_status.changesDroppedToStage.connect(self._handle_changes_drop_to_stage)
+        self.file_status.changesDroppedToWorking.connect(self._handle_changes_drop_to_working)
+        self.file_status.changesDroppedToTrash.connect(self._handle_changes_drop_to_trash)
 
         self.refresh_timer = QTimer(self)
         self.refresh_timer.setInterval(2500)
@@ -346,6 +349,25 @@ class MainWindow(QMainWindow):
             return
         self._execute_plan(plan)
 
+    def _handle_changes_drop_to_working(self, changes: list[FileChange]) -> None:
+        if self.state is None:
+            return
+        staged = [change for change in changes if change.area == "staged"]
+        if not staged:
+            QMessageBox.information(self, "Operation Not Available", "Drag staged files back to the working area to unstage them.")
+            return
+        try:
+            plan = self.planner.unstage_paths(self.state, staged)
+        except ValueError as exc:
+            QMessageBox.information(self, "Operation Not Available", str(exc))
+            return
+        self.graph.set_preview_plan(plan)
+        self.command_panel.setHtml(_render_plan_html(plan, details_open=False))
+        confirm = CommandPlanDialog(plan, self)
+        if confirm.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._execute_plan(plan)
+
     def _handle_stage_drop_on_branch(self, branch: Reference) -> None:
         if self.state is None:
             return
@@ -354,6 +376,36 @@ class MainWindow(QMainWindow):
             return
         try:
             plan = self.planner.commit_to_branch(self.state, branch.name, message)
+        except ValueError as exc:
+            QMessageBox.information(self, "Operation Not Available", str(exc))
+            return
+        self.graph.set_preview_plan(plan)
+        self.command_panel.setHtml(_render_plan_html(plan, details_open=False))
+        confirm = CommandPlanDialog(plan, self)
+        if confirm.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._execute_plan(plan)
+
+    def _handle_changes_drop_to_trash(self, changes: list[FileChange]) -> None:
+        if self.state is None:
+            return
+        try:
+            plan = self.planner.discard_changes(self.state, changes)
+        except ValueError as exc:
+            QMessageBox.information(self, "Operation Not Available", str(exc))
+            return
+        self.graph.set_preview_plan(plan)
+        self.command_panel.setHtml(_render_plan_html(plan, details_open=True))
+        confirm = CommandPlanDialog(plan, self)
+        if confirm.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._execute_plan(plan)
+
+    def _handle_commit_drop_on_commit(self, source: Commit, target: Commit) -> None:
+        if self.state is None:
+            return
+        try:
+            plan = self.planner.replay_commit_after(self.state, source, target)
         except ValueError as exc:
             QMessageBox.information(self, "Operation Not Available", str(exc))
             return
@@ -644,7 +696,7 @@ QGroupBox::title {
     color: #52616f;
     font-weight: 700;
 }
-QLineEdit, QComboBox, QTextEdit, QTextBrowser, QTableWidget {
+QLineEdit, QTextEdit, QTextBrowser, QTableWidget, QListWidget, QLabel#dropZone {
     background: #ffffff;
     border: 1px solid #cfd8e3;
     border-radius: 6px;
@@ -668,15 +720,6 @@ QPushButton:hover {
 QPushButton:disabled {
     background: #a9b6c5;
 }
-QPushButton#windowControl {
-    background: #eef2f6;
-    color: #344054;
-    border: 1px solid #cfd8e3;
-    padding: 0;
-}
-QPushButton#windowControl:hover {
-    background: #dce9f8;
-}
 QHeaderView::section {
     background: #eef2f6;
     border: 0;
@@ -687,6 +730,19 @@ QHeaderView::section {
 QTableWidget {
     gridline-color: #edf1f5;
     alternate-background-color: #f8fafc;
+}
+QListWidget {
+    alternate-background-color: #f8fafc;
+}
+QListWidget[dropActive="true"], QLabel[dropActive="true"] {
+    border: 2px solid #1f6feb;
+    background: #e8f2ff;
+}
+QLabel#subtleHeading {
+    color: #52616f;
+    font-weight: 700;
+    border: 0;
+    padding: 0;
 }
 QSplitter::handle {
     background: #d8e0e8;
