@@ -47,23 +47,38 @@ class MainWindow(QMainWindow):
         self.planner = OperationPlanner()
         self.executor = CommandExecutor()
         self.state: Optional[RepositoryState] = None
-        self.child_windows: list[QMainWindow] = []
         self.auto_refresh_enabled = True
         self.refresh_in_progress = False
         self.setWindowTitle("Gitualizer")
-        self.resize(1320, 840)
+        self.resize(1120, 720)
         self.setStyleSheet(APP_STYLE)
 
         self.path_edit = QLineEdit(str(initial_path or Path.cwd()))
         self.path_edit.setPlaceholderText("Path inside a Git repository")
         self.open_button = QPushButton("Browse")
         self.refresh_button = QPushButton("Refresh")
+        self.minimize_button = QPushButton("-")
+        self.fullscreen_button = QPushButton("[]")
+        self.close_button = QPushButton("X")
+        for button, tooltip in [
+            (self.minimize_button, "Minimize"),
+            (self.fullscreen_button, "Toggle full screen"),
+            (self.close_button, "Close"),
+        ]:
+            button.setObjectName("windowControl")
+            button.setToolTip(tooltip)
+            button.setFixedSize(30, 28)
 
         top = QHBoxLayout()
+        top.setSpacing(8)
         top.addWidget(QLabel("Repository"))
         top.addWidget(self.path_edit, 1)
         top.addWidget(self.open_button)
         top.addWidget(self.refresh_button)
+        top.addSpacing(8)
+        top.addWidget(self.minimize_button)
+        top.addWidget(self.fullscreen_button)
+        top.addWidget(self.close_button)
 
         self.graph = CommitGraphWidget()
         graph_scroll = QScrollArea()
@@ -80,7 +95,7 @@ class MainWindow(QMainWindow):
 
         self.command_panel = QTextBrowser()
         self.command_panel.setOpenExternalLinks(False)
-        self.command_panel.setMinimumHeight(150)
+        self.command_panel.setMinimumHeight(115)
         self.command_panel.setHtml(_empty_preview_html())
 
         self.branch_combo = QComboBox()
@@ -102,44 +117,50 @@ class MainWindow(QMainWindow):
         self.push_button = QPushButton("Push")
 
         self.working_panel = self._panel("Working Tree and Index", self.status_table)
-        operations = self._operations_panel()
+        self.operations_panel = self._operations_panel()
 
         self.repo_panel = self._panel("Repository State", self.summary)
         self.refs_panel = self._panel("References", self.refs_table)
         self.remotes_panel = self._panel("Remotes", self.remotes_table)
-        right = QWidget()
-        right_layout = QVBoxLayout(right)
+        self.right_panel = QWidget()
+        right_layout = QVBoxLayout(self.right_panel)
         right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(8)
         right_layout.addWidget(self.repo_panel)
         right_layout.addWidget(self.refs_panel, 2)
         right_layout.addWidget(self.remotes_panel, 1)
 
-        main_splitter = QSplitter()
-        main_splitter.addWidget(self.working_panel)
-        main_splitter.addWidget(graph_scroll)
-        main_splitter.addWidget(right)
-        main_splitter.setChildrenCollapsible(False)
-        main_splitter.setSizes([330, 710, 370])
+        self.graph_scroll = graph_scroll
+        self.main_splitter = QSplitter()
+        self.main_splitter.addWidget(self.working_panel)
+        self.main_splitter.addWidget(self.graph_scroll)
+        self.main_splitter.addWidget(self.right_panel)
+        self.main_splitter.setChildrenCollapsible(False)
+        self.main_splitter.setSizes([280, 600, 300])
 
-        bottom_splitter = QSplitter(Qt.Orientation.Horizontal)
-        bottom_splitter.addWidget(operations)
-        bottom_splitter.addWidget(self._panel("Operation / Preview / Commands", self.command_panel))
-        bottom_splitter.setChildrenCollapsible(False)
-        bottom_splitter.setSizes([430, 880])
+        self.command_panel_group = self._panel("Operation / Preview / Commands", self.command_panel)
+        self.bottom_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.bottom_splitter.addWidget(self.operations_panel)
+        self.bottom_splitter.addWidget(self.command_panel_group)
+        self.bottom_splitter.setChildrenCollapsible(False)
+        self.bottom_splitter.setSizes([360, 720])
 
         root = QWidget()
         root_layout = QVBoxLayout(root)
-        root_layout.setContentsMargins(14, 14, 14, 14)
-        root_layout.setSpacing(12)
+        root_layout.setContentsMargins(8, 8, 8, 8)
+        root_layout.setSpacing(8)
         root_layout.addLayout(top)
-        root_layout.addWidget(main_splitter, 1)
-        root_layout.addWidget(bottom_splitter)
+        root_layout.addWidget(self.main_splitter, 1)
+        root_layout.addWidget(self.bottom_splitter)
         self.setCentralWidget(root)
         self._build_menus()
 
         self.open_button.clicked.connect(self._browse)
         self.refresh_button.clicked.connect(self.refresh)
         self.path_edit.returnPressed.connect(self.refresh)
+        self.minimize_button.clicked.connect(self.showMinimized)
+        self.fullscreen_button.clicked.connect(self._toggle_fullscreen)
+        self.close_button.clicked.connect(self.close)
         self.switch_button.clicked.connect(self._switch_branch)
         self.create_branch_button.clicked.connect(self._create_branch)
         self.stage_selected_button.clicked.connect(self._stage_selected)
@@ -176,11 +197,12 @@ class MainWindow(QMainWindow):
         edit_menu.addAction("Commit Staged", self._commit)
 
         view_menu = self.menuBar().addMenu("View")
-        view_menu.addAction("Open Graph Window", self._open_graph_window)
-        view_menu.addAction("Open Status Window", self._open_status_window)
-        view_menu.addAction("Open Command Preview Window", self._open_command_window)
+        view_menu.addAction("Workspace", self._workspace_mode)
+        view_menu.addAction("Graph Focus", self._graph_focus_mode)
+        view_menu.addAction("Status Focus", self._status_focus_mode)
+        view_menu.addAction("Command Focus", self._command_focus_mode)
         view_menu.addSeparator()
-        view_menu.addAction("Full Screen", self.showFullScreen)
+        view_menu.addAction("Toggle Full Screen", self._toggle_fullscreen)
         view_menu.addAction("Maximized", self.showMaximized)
         view_menu.addAction("Normal Size", self.showNormal)
 
@@ -206,7 +228,7 @@ class MainWindow(QMainWindow):
         table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
         table.verticalHeader().setVisible(False)
-        table.verticalHeader().setDefaultSectionSize(30)
+        table.verticalHeader().setDefaultSectionSize(24)
         table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         table.horizontalHeader().setStretchLastSection(True)
         return table
@@ -220,6 +242,9 @@ class MainWindow(QMainWindow):
     def _operations_panel(self) -> QWidget:
         group = QGroupBox("V1 Safe Operations")
         layout = QGridLayout(group)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setHorizontalSpacing(6)
+        layout.setVerticalSpacing(6)
         layout.addWidget(QLabel("Branch"), 0, 0)
         layout.addWidget(self.branch_combo, 0, 1)
         layout.addWidget(self.switch_button, 0, 2)
@@ -248,9 +273,7 @@ class MainWindow(QMainWindow):
             self.refresh()
 
     def _auto_refresh(self) -> None:
-        if self.auto_refresh_enabled and self.state is not None and not self.isActiveWindow():
-            self.refresh(show_errors=False)
-        elif self.auto_refresh_enabled and self.state is not None:
+        if self.auto_refresh_enabled and self.state is not None:
             self.refresh(show_errors=False)
 
     def _set_auto_refresh(self, enabled: bool) -> None:
@@ -443,29 +466,43 @@ class MainWindow(QMainWindow):
     def _push(self) -> None:
         self._with_plan(self.planner.push_current_branch)
 
-    def _open_graph_window(self) -> None:
-        if self.state is None:
-            return
-        graph = CommitGraphWidget()
-        graph.set_state(self.state)
-        window = _child_window("Gitualizer - Graph", graph, 940, 720)
-        self.child_windows.append(window)
-        window.show()
+    def _workspace_mode(self) -> None:
+        self.working_panel.show()
+        self.graph_scroll.show()
+        self.right_panel.show()
+        self.bottom_splitter.show()
+        self.operations_panel.show()
+        self.command_panel_group.show()
+        self.main_splitter.setSizes([280, 600, 300])
+        self.bottom_splitter.setSizes([360, 720])
 
-    def _open_status_window(self) -> None:
-        text = QTextEdit()
-        text.setReadOnly(True)
-        text.setPlainText(self.summary.text())
-        window = _child_window("Gitualizer - Repository Status", text, 620, 420)
-        self.child_windows.append(window)
-        window.show()
+    def _graph_focus_mode(self) -> None:
+        self.working_panel.hide()
+        self.graph_scroll.show()
+        self.right_panel.hide()
+        self.bottom_splitter.hide()
 
-    def _open_command_window(self) -> None:
-        text = QTextBrowser()
-        text.setHtml(self.command_panel.toHtml())
-        window = _child_window("Gitualizer - Command Preview", text, 760, 520)
-        self.child_windows.append(window)
-        window.show()
+    def _status_focus_mode(self) -> None:
+        self.working_panel.show()
+        self.graph_scroll.hide()
+        self.right_panel.show()
+        self.bottom_splitter.hide()
+        self.main_splitter.setSizes([520, 0, 520])
+
+    def _command_focus_mode(self) -> None:
+        self.working_panel.hide()
+        self.graph_scroll.show()
+        self.right_panel.hide()
+        self.bottom_splitter.show()
+        self.operations_panel.show()
+        self.command_panel_group.show()
+        self.bottom_splitter.setSizes([330, 760])
+
+    def _toggle_fullscreen(self) -> None:
+        if self.isFullScreen():
+            self.showNormal()
+        else:
+            self.showFullScreen()
 
     def _about(self) -> None:
         QMessageBox.information(
@@ -507,15 +544,6 @@ class CommandPlanDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
-
-
-def _child_window(title: str, widget: QWidget, width: int, height: int) -> QMainWindow:
-    window = QMainWindow()
-    window.setWindowTitle(title)
-    window.resize(width, height)
-    window.setCentralWidget(widget)
-    window.setStyleSheet(APP_STYLE)
-    return window
 
 
 def _empty_preview_html() -> str:
@@ -622,7 +650,7 @@ QMainWindow, QWidget {
     background: #f4f6f8;
     color: #1f2933;
     font-family: "Inter", "Segoe UI", "Noto Sans", sans-serif;
-    font-size: 10pt;
+    font-size: 9pt;
 }
 QMenuBar {
     background: #ffffff;
@@ -645,8 +673,8 @@ QGroupBox {
     background: #ffffff;
     border: 1px solid #d9e0e7;
     border-radius: 8px;
-    margin-top: 18px;
-    padding: 12px;
+    margin-top: 14px;
+    padding: 7px;
 }
 QGroupBox::title {
     subcontrol-origin: margin;
@@ -659,7 +687,7 @@ QLineEdit, QComboBox, QTextEdit, QTextBrowser, QTableWidget {
     background: #ffffff;
     border: 1px solid #cfd8e3;
     border-radius: 6px;
-    padding: 6px;
+    padding: 4px;
     selection-background-color: #d8ecff;
 }
 QTextEdit, QTextBrowser {
@@ -670,7 +698,7 @@ QPushButton {
     color: #ffffff;
     border: 0;
     border-radius: 6px;
-    padding: 7px 12px;
+    padding: 5px 9px;
     font-weight: 700;
 }
 QPushButton:hover {
@@ -679,11 +707,20 @@ QPushButton:hover {
 QPushButton:disabled {
     background: #a9b6c5;
 }
+QPushButton#windowControl {
+    background: #eef2f6;
+    color: #344054;
+    border: 1px solid #cfd8e3;
+    padding: 0;
+}
+QPushButton#windowControl:hover {
+    background: #dce9f8;
+}
 QHeaderView::section {
     background: #eef2f6;
     border: 0;
     border-right: 1px solid #d9e0e7;
-    padding: 7px;
+    padding: 4px;
     font-weight: 700;
 }
 QTableWidget {
