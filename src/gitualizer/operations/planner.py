@@ -278,6 +278,42 @@ class OperationPlanner:
             state_fingerprint=state_fingerprint(state),
         )
 
+    def push_branch_to_remote_tracking(
+        self,
+        state: RepositoryState,
+        local_ref: Reference,
+        remote_ref: Reference,
+    ) -> CommandPlan:
+        if local_ref.kind != "local_branch" or remote_ref.kind != "remote_tracking":
+            raise ValueError("Drag a local branch onto a remote-tracking branch.")
+        if "/" not in remote_ref.name:
+            raise ValueError("Remote-tracking branch must include a remote name.")
+        remote, remote_branch = remote_ref.name.split("/", 1)
+        refspec = local_ref.name if local_ref.name == remote_branch else f"{local_ref.name}:{remote_branch}"
+        return CommandPlan(
+            title=f"Push {local_ref.name} to {remote_ref.name}",
+            explanation=(
+                f"Ask `{remote}` to move its `{remote_branch}` branch to the commit pointed to by local "
+                f"`{local_ref.name}`. The local `{remote_ref.name}` tracking ref updates after a successful push/fetch."
+            ),
+            steps=[CommandStep(["git", "push", remote, refspec], "Push the local branch to the selected remote branch.")],
+            expected_effects=[
+                f"The remote branch `{remote}:{remote_branch}` may move to `{local_ref.name}`.",
+                f"`{remote_ref.name}` may update after Git observes the successful push.",
+            ],
+            preview_steps=[
+                f"Compare local `{local_ref.name}` with cached `{remote_ref.name}`.",
+                f"If the remote accepts the update, move `{remote}:{remote_branch}` to `{local_ref.name}`.",
+                f"Refresh the local remote-tracking label `{remote_ref.name}`.",
+            ],
+            warnings=[
+                "Git will reject this push if it is not a fast-forward.",
+                "If history was rewritten, use an explicit force-with-lease workflow instead of this normal push.",
+            ],
+            remote_impact=f"May update `{remote_branch}` on `{remote}`.",
+            state_fingerprint=state_fingerprint(state),
+        )
+
     def integrate_remote_tracking(
         self,
         state: RepositoryState,

@@ -378,11 +378,15 @@ class MainWindow(QMainWindow):
                     self.planner.integrate_local_branch(self.state, source, target, "merge_source_into_target"),
                     self.planner.integrate_local_branch(self.state, source, target, "rebase_source_onto_target"),
                 ]
+            elif source.kind == "local_branch" and target.kind == "remote_tracking":
+                plans = [
+                    self.planner.push_branch_to_remote_tracking(self.state, source, target),
+                ]
             else:
                 QMessageBox.information(
                     self,
                     "No Graph Operation",
-                    "This drag does not map to a supported operation yet. Try dragging a remote-tracking branch onto a local branch.",
+                    "This drag does not map to a supported operation yet. Try dragging branches between local and remote-tracking refs.",
                 )
                 return
         except ValueError as exc:
@@ -464,6 +468,9 @@ class MainWindow(QMainWindow):
         create_branch = menu.addAction("Create Branch Here...")
         create_and_switch = menu.addAction("Create and Switch Branch Here...")
         menu.addSeparator()
+        revert_commit = menu.addAction("Revert Commit on Current Branch")
+        drop_commit = menu.addAction("Drop Commit from Current Branch...")
+        menu.addSeparator()
         copy_oid = menu.addAction("Copy Commit Hash")
         selected = menu.exec(global_pos)
         if selected is None:
@@ -488,6 +495,13 @@ class MainWindow(QMainWindow):
                 else:
                     plan = self.planner.create_and_switch_branch_at_commit(self.state, commit, branch_name)
                 self._preview_and_confirm(plan)
+                return
+            if selected == revert_commit:
+                self._preview_and_confirm(self.planner.revert_commit_on_current_branch(self.state, commit))
+                return
+            if selected == drop_commit:
+                self._preview_and_confirm(self.planner.drop_commit_from_current_branch(self.state, commit))
+                return
         except ValueError as exc:
             QMessageBox.information(self, "Operation Not Available", str(exc))
 

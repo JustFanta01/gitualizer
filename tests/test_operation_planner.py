@@ -80,6 +80,23 @@ def test_fetch_and_push_explain_remote_impact() -> None:
     assert "origin/main" in push.remote_impact
 
 
+def test_drag_local_branch_onto_remote_tracking_pushes_to_remote_branch() -> None:
+    repo_state = state()
+    local = repo_state.local_branches[0]
+    remote = Reference(
+        name="origin/main",
+        full_name="refs/remotes/origin/main",
+        target="c" * 40,
+        kind="remote_tracking",
+    )
+
+    plan = OperationPlanner().push_branch_to_remote_tracking(repo_state, local, remote)
+
+    assert plan.steps[0].args == ["git", "push", "origin", "main"]
+    assert "origin:main" in plan.expected_effects[0]
+    assert "fast-forward" in plan.warnings[0]
+
+
 def test_staging_selected_paths_keeps_paths_after_separator() -> None:
     plan = OperationPlanner().stage_paths(state(), [FileChange(path="file with spaces.txt", area="working_tree", code="M")])
 
