@@ -33,6 +33,7 @@ class CommitGraphWidget(QWidget):
     stashDroppedToTrash = Signal(str)
     referenceDroppedToTrash = Signal(object)
     commitContextRequested = Signal(object, object)
+    commitsContextRequested = Signal(object, object)
     referenceContextRequested = Signal(object, object)
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
@@ -675,6 +676,12 @@ class CommitGraphWidget(QWidget):
         commit = fallback or self._drag_commit
         return [commit] if commit is not None else []
 
+    def selected_commits(self, fallback: Optional[Commit] = None) -> list[Commit]:
+        """Return the visible multi-selection when it contains the clicked commit."""
+        if fallback is not None and fallback.oid not in self._selected_oids:
+            return [fallback]
+        return self._dragged_commits(fallback)
+
     def _commit_at(self, pos: QPoint) -> Optional[Commit]:
         for rect, commit in reversed(self._commit_hitboxes):
             if rect.contains(pos):
@@ -694,7 +701,11 @@ class CommitGraphWidget(QWidget):
             return
         commit = self._commit_at(event.pos())
         if commit is not None:
-            self.commitContextRequested.emit(commit, event.globalPos())
+            selected = self.selected_commits(commit)
+            if len(selected) > 1:
+                self.commitsContextRequested.emit(selected, event.globalPos())
+            else:
+                self.commitContextRequested.emit(commit, event.globalPos())
             event.accept()
             return
         super().contextMenuEvent(event)

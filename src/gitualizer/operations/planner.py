@@ -723,6 +723,42 @@ class OperationPlanner:
             raise ValueError("A local branch must be checked out to revert a commit.")
         return self.revert_commit_on_branch(state, source, current)
 
+    def revert_commits_on_current_branch(self, state: RepositoryState, sources: list[Commit]) -> CommandPlan:
+        current = _current_branch_ref(state)
+        if current is None:
+            raise ValueError("A local branch must be checked out to revert commits.")
+        ordered = _oldest_first(state, sources)
+        if not ordered:
+            raise ValueError("Select one or more commits.")
+        if any(len(commit.parents) != 1 for commit in ordered):
+            raise ValueError("Bulk revert currently supports only single-parent commits.")
+        newest_first = list(reversed(ordered))
+        return CommandPlan(
+            title=f"Revert {len(newest_first)} commits on {current.name}",
+            explanation=(
+                f"Create {len(newest_first)} new commits on `{current.name}` that undo the selected changes "
+                "without rewriting existing history."
+            ),
+            steps=[
+                CommandStep(["git", "switch", current.name], f"Attach HEAD to `{current.name}`."),
+                CommandStep(
+                    ["git", "revert", "--no-edit", *[commit.oid for commit in newest_first]],
+                    "Revert the selected commits from newest to oldest.",
+                ),
+            ],
+            expected_effects=[
+                f"`{current.name}` moves forward by up to {len(newest_first)} revert commits.",
+                "The selected commits remain in history.",
+            ],
+            preview_steps=[
+                f"Attach HEAD to `{current.name}`.",
+                "Apply inverse patches from newest selected commit to oldest.",
+                "Create one revert commit for each selected commit.",
+            ],
+            warnings=["Revert may stop for conflicts."],
+            state_fingerprint=state_fingerprint(state),
+        )
+
     def drop_commit_from_current_branch(self, state: RepositoryState, source: Commit) -> CommandPlan:
         current = _current_branch_ref(state)
         if current is None:

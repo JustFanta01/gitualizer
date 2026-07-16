@@ -204,6 +204,7 @@ class MainWindow(QMainWindow):
         self.stash_widget.changesDropped.connect(self._handle_changes_drop_to_stash)
         self.graph.referenceDroppedToTrash.connect(self._handle_reference_drop_to_trash)
         self.graph.commitContextRequested.connect(self._show_commit_context_menu)
+        self.graph.commitsContextRequested.connect(self._show_commits_context_menu)
         self.graph.referenceContextRequested.connect(self._show_reference_context_menu)
         self.file_status.changesDroppedToStage.connect(self._handle_changes_drop_to_stage)
         self.file_status.changesDroppedToWorking.connect(self._handle_changes_drop_to_working)
@@ -852,6 +853,21 @@ class MainWindow(QMainWindow):
         except ValueError as exc:
             QMessageBox.information(self, "Operation Not Available", str(exc))
 
+    def _show_commits_context_menu(self, commits: list[Commit], global_pos) -> None:
+        if self.state is None or not commits:
+            return
+        menu = QMenu(self)
+        revert_commits = menu.addAction(f"Revert {len(commits)} Commits on Current Branch")
+        selected = menu.exec(global_pos)
+        if selected != revert_commits:
+            return
+        try:
+            plan = self.planner.revert_commits_on_current_branch(self.state, commits)
+        except ValueError as exc:
+            QMessageBox.information(self, "Operation Not Available", str(exc))
+            return
+        self._preview_and_confirm(plan)
+
     def _show_reference_context_menu(self, ref: Reference, global_pos) -> None:
         if self.state is None:
             return
@@ -980,6 +996,10 @@ class MainWindow(QMainWindow):
         if self.state is None:
             return
         plans: list[CommandPlan] = []
+        try:
+            plans.append(self.planner.revert_commits_on_current_branch(self.state, sources))
+        except ValueError:
+            pass
         try:
             plans.append(self.planner.drop_commits_from_current_branch(self.state, sources))
         except ValueError:

@@ -244,6 +244,39 @@ def test_bulk_drop_requires_and_removes_a_contiguous_sequence() -> None:
     assert plan.destructive is True
 
 
+def test_bulk_revert_uses_newest_first_without_rewriting_history() -> None:
+    repo_state = state()
+    base = Commit("b" * 40, "b" * 12, ("a" * 40,), "A", "a@example.invalid", "2024-01-01T00:00:00+00:00", "base")
+    older = Commit("c" * 40, "c" * 12, (base.oid,), "A", "a@example.invalid", "2024-01-02T00:00:00+00:00", "older")
+    newer = Commit("d" * 40, "d" * 12, (older.oid,), "A", "a@example.invalid", "2024-01-03T00:00:00+00:00", "newer")
+    repo_state.commits.update({newer.oid: newer, older.oid: older, base.oid: base})
+    repo_state.references[0] = replace(repo_state.references[0], target=newer.oid)
+
+    plan = OperationPlanner().revert_commits_on_current_branch(repo_state, [older, newer])
+
+    assert plan.steps[0].args == ["git", "switch", "main"]
+    assert plan.steps[1].args == ["git", "revert", "--no-edit", newer.oid, older.oid]
+    assert plan.history_rewrite is False
+    assert plan.destructive is False
+
+
+def test_bulk_revert_rejects_merge_commits() -> None:
+    repo_state = state()
+    merge = Commit(
+        "c" * 40,
+        "c" * 12,
+        ("a" * 40, "b" * 40),
+        "A",
+        "a@example.invalid",
+        "2024-01-02T00:00:00+00:00",
+        "merge",
+    )
+    repo_state.commits[merge.oid] = merge
+
+    with pytest.raises(ValueError, match="single-parent"):
+        OperationPlanner().revert_commits_on_current_branch(repo_state, [merge])
+
+
 def test_drop_commit_on_branch_can_cherry_pick_or_revert() -> None:
     repo_state = state()
     source = Commit("b" * 40, "b" * 12, tuple(), "A", "a@example.invalid", "2024-01-01T00:00:00+00:00", "source")
