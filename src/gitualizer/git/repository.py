@@ -70,19 +70,28 @@ class RepositoryReader:
         )
 
     def _read_references(self, root: Path) -> list[Reference]:
-        fmt = "%(refname)%1f%(refname:short)%1f%(objectname)%1f%(upstream:short)%1f%(upstream:track)%1e"
+        fmt = (
+            "%(refname)%1f%(refname:short)%1f%(objectname)%1f%(*objectname)%1f"
+            "%(upstream:short)%1f%(upstream:track)%1e"
+        )
         result = self.runner.run(["for-each-ref", f"--format={fmt}", "refs/heads", "refs/remotes", "refs/tags"], cwd=root)
         references: list[Reference] = []
         for record in result.stdout.split("\x1e"):
             if not record.strip():
                 continue
-            full_name, short_name, target, upstream, track = (record.strip("\n").split("\x1f") + [""] * 5)[:5]
+            full_name, short_name, target, peeled_target, upstream, track = (
+                record.strip("\n").split("\x1f") + [""] * 6
+            )[:6]
             if full_name.startswith("refs/heads/"):
                 kind = "local_branch"
             elif full_name.startswith("refs/remotes/"):
                 kind = "remote_tracking"
             elif full_name.startswith("refs/tags/"):
                 kind = "tag"
+                # Annotated tags point to a tag object. Graph references need
+                # the peeled commit OID, while lightweight tags already point
+                # directly to their target and have no peeled value.
+                target = peeled_target or target
             else:
                 kind = "other"
             ahead, behind = self._parse_track(track)

@@ -54,6 +54,7 @@ def test_reads_commits_refs_remotes_and_changes(tmp_path: Path) -> None:
     write(work, "feature.txt", "feature\n")
     feature_oid = commit(work, "feature commit")
     git(work, "tag", "v0")
+    git(work, "tag", "-a", "v1-annotated", "-m", "annotated release")
     git(work, "switch", "main")
 
     write(work, "README.md", "initial\nworking tree edit\n")
@@ -74,6 +75,9 @@ def test_reads_commits_refs_remotes_and_changes(tmp_path: Path) -> None:
     assert refs["feature"].target == feature_oid
     assert refs["origin/main"].kind == "remote_tracking"
     assert refs["v0"].kind == "tag"
+    assert refs["v0"].target == feature_oid
+    assert refs["v1-annotated"].kind == "tag"
+    assert refs["v1-annotated"].target == feature_oid
 
     assert state.remotes[0].name == "origin"
     assert state.remotes[0].fetch_url == str(remote)
