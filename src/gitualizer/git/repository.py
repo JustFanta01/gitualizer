@@ -116,7 +116,14 @@ class RepositoryReader:
     def _read_commits(self, root: Path, commit_limit: int) -> tuple[dict[str, Commit], bool]:
         fmt = "%H%x1f%P%x1f%an%x1f%ae%x1f%aI%x1f%s%x1e"
         limit = max(1, commit_limit + 1)
-        result = self.runner.run(["log", "--all", "--date-order", f"--max-count={limit}", f"--format={fmt}"], cwd=root, check=False)
+        # Reflogs keep recently detached/re-written commits visible even when no
+        # branch or tag reaches them.  The graph can then call attention to
+        # those recoverable, but otherwise easy-to-lose, sequences.
+        result = self.runner.run(
+            ["log", "--all", "--reflog", "--date-order", f"--max-count={limit}", f"--format={fmt}"],
+            cwd=root,
+            check=False,
+        )
         if result.returncode != 0:
             return {}, False
         commits: dict[str, Commit] = {}

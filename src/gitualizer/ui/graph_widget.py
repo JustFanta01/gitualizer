@@ -25,6 +25,9 @@ class CommitGraphWidget(QWidget):
     stageDroppedOnBranch = Signal(object)
     commitDroppedOnCommit = Signal(object, object)
     commitDroppedToTrash = Signal(object)
+    commitsDroppedOnReference = Signal(object, object)
+    commitsDroppedOnCommit = Signal(object, object)
+    commitsDroppedToTrash = Signal(object)
     referenceDroppedToTrash = Signal(object)
     commitContextRequested = Signal(object, object)
     referenceContextRequested = Signal(object, object)
@@ -38,6 +41,10 @@ class CommitGraphWidget(QWidget):
         self._commit_hitboxes: list[tuple[QRectF, Commit]] = []
         self._drag_ref: Optional[Reference] = None
         self._drag_commit: Optional[Commit] = None
+        self._selected_oids: set[str] = set()
+        self._selection_origin: Optional[QPointF] = None
+        self._selection_rect = QRectF()
+        self._selection_base: set[str] = set()
         self._drag_pos: Optional[QPoint] = None
         self._hover_ref: Optional[Reference] = None
         self._hover_commit: Optional[Commit] = None
@@ -50,18 +57,43 @@ class CommitGraphWidget(QWidget):
         self._viewport_height = 340
         self._row_spacing = 52
         self._lane_spacing = 72
+        self._zoom = 1.0
         self.setMinimumSize(420, 340)
         self.setMouseTracking(True)
         self.setAcceptDrops(True)
 
     def set_state(self, state: Optional[RepositoryState]) -> None:
         self._state = state
+        if state is None:
+            self._selected_oids.clear()
+        else:
+            self._selected_oids.intersection_update(state.commits)
         self._nodes = self._layout_nodes(state)
         row_count = max(len(self._nodes), 8)
         lane_count = max((int(node.x) for node in self._nodes.values()), default=1)
-        self.setMinimumHeight(84 + row_count * self._row_spacing)
+        self.setMinimumHeight(int(84 + row_count * self._row_spacing * self._zoom))
         self.setMinimumWidth(max(500, lane_count + 420))
         self.update()
+
+    def set_visualization(self, *, row_spacing: Optional[int] = None, lane_spacing: Optional[int] = None, zoom: Optional[float] = None) -> None:
+        if row_spacing is not None:
+            self._row_spacing = max(30, min(110, row_spacing))
+        if lane_spacing is not None:
+            self._lane_spacing = max(48, min(160, lane_spacing))
+        if zoom is not None:
+            self._zoom = max(0.65, min(1.75, zoom))
+        self._nodes = self._layout_nodes(self._state)
+        if self._state is not None:
+            self.set_state(self._state)
+        else:
+            self.update()
+
+    @property
+    def zoom(self) -> float:
+        return self._zoom
+
+    def _font(self, size: int, weight: QFont.Weight = QFont.Weight.Normal) -> QFont:
+        return QFont("Sans Serif", max(6, round(size * self._zoom)), weight)
 
     def set_preview_plan(self, plan: Optional[CommandPlan]) -> None:
         self._preview_plan = plan
@@ -106,8 +138,8 @@ class CommitGraphWidget(QWidget):
             lane = lane_by_oid.get(commit.oid, 0)
             nodes[commit.oid] = CommitNode(
                 oid=commit.oid,
-                x=78 + lane * self._lane_spacing,
-                y=116 + index * self._row_spacing,
+                x=78 + lane * self._lane_spacing * self._zoom,
+                y=116 + index * self._row_spacing * self._zoom,
             )
         return nodes
 
@@ -140,10 +172,11 @@ class CommitGraphWidget(QWidget):
         self._draw_git_flow(painter)
         self._draw_trash(painter)
         self._draw_drag(painter)
+        self._draw_selection(painter)
 
     def _draw_branch_overview(self, painter: QPainter, include_remote_columns: bool) -> None:
         assert self._state is not None
-        painter.setFont(QFont("Sans Serif", 10, QFont.Weight.Bold))
+        painter.setFont(self._font(10, QFont.Weight.Bold))
         painter.setPen(QColor("#1f2933"))
         if include_remote_columns:
             gutter = 34.0
@@ -166,7 +199,7 @@ class CommitGraphWidget(QWidget):
                 y += 46
         if self._state.commits_truncated:
             painter.setPen(QColor("#6b7280"))
-            painter.setFont(QFont("Sans Serif", 8))
+            painter.setFont(self._font(8))
             painter.drawText(QRectF(48, self.height() - 34, 620, 24), f"Commit history is lazy-loaded: showing latest {self._state.commit_limit} commits.")
 
     def _draw_branch_card(
@@ -191,7 +224,7 @@ class CommitGraphWidget(QWidget):
         painter.setBrush(QColor(color.red(), color.green(), color.blue(), 72 if is_target else (46 if is_possible else 20)))
         painter.drawRoundedRect(rect, 7, 7)
         painter.setPen(color)
-        painter.setFont(QFont("Sans Serif", 9, QFont.Weight.Bold))
+        painter.setFont(self._font(9, QFont.Weight.Bold))
         name_prefix = "||| -> " if ref.kind == "remote_tracking" else "||| "
         name_text = painter.fontMetrics().elidedText(
             f"{name_prefix}{ref.name}",
@@ -199,7 +232,7 @@ class CommitGraphWidget(QWidget):
             int(width - 68),
         )
         painter.drawText(rect.adjusted(8, 4, -54, -17), Qt.AlignmentFlag.AlignVCenter, name_text)
-        painter.setFont(QFont("Sans Serif", 8))
+        painter.setFont(self._font(8))
         painter.setPen(QColor("#52616f"))
         meta = ref.target[:12]
         if ref.upstream:
@@ -214,7 +247,7 @@ class CommitGraphWidget(QWidget):
             painter.setPen(QPen(QColor("#ffffff"), 1))
             painter.drawEllipse(QPointF(x + width - 22, y + 18), 8, 8)
             painter.setPen(QColor("#ffffff"))
-            painter.setFont(QFont("Sans Serif", 7, QFont.Weight.Bold))
+            painter.setFont(self._font(7, QFont.Weight.Bold))
             painter.drawText(QRectF(x + width - 30, y + 10, 16, 16), Qt.AlignmentFlag.AlignCenter, str(ref.behind))
         if include_remote_columns and ref.ahead and ref.ahead > 0:
             painter.setBrush(QColor("#d1242f"))
@@ -225,7 +258,7 @@ class CommitGraphWidget(QWidget):
 
     def _draw_empty(self, painter: QPainter, text: str) -> None:
         painter.setPen(QColor("#666a73"))
-        painter.setFont(QFont("Sans Serif", 12))
+        painter.setFont(self._font(12))
         painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, text)
 
     def _draw_git_flow(self, painter: QPainter) -> None:
@@ -252,9 +285,9 @@ class CommitGraphWidget(QWidget):
             painter.setBrush(QColor(color.red(), color.green(), color.blue(), 22 if active else 10))
             painter.drawRoundedRect(rect, 8, 8)
             painter.setPen(QColor("#1f2933"))
-            painter.setFont(QFont("Sans Serif", 8, QFont.Weight.Bold))
+            painter.setFont(self._font(8, QFont.Weight.Bold))
             painter.drawText(rect.adjusted(8, 7, -8, -27), Qt.AlignmentFlag.AlignLeft, title)
-            painter.setFont(QFont("Sans Serif", 8))
+            painter.setFont(self._font(8))
             painter.setPen(QColor("#52616f"))
             painter.drawText(rect.adjusted(8, 26, -8, -7), Qt.AlignmentFlag.AlignLeft, subtitle)
             if index < len(flow) - 1:
@@ -283,7 +316,7 @@ class CommitGraphWidget(QWidget):
         x = 78
         while x < self.width():
             painter.drawLine(QPointF(x, 90), QPointF(x, self.height()))
-            x += self._lane_spacing
+            x += self._lane_spacing * self._zoom
 
     def _draw_preview(self, painter: QPainter) -> None:
         if self._preview_plan is None or self._state is None:
@@ -301,11 +334,12 @@ class CommitGraphWidget(QWidget):
         painter.setPen(QPen(QColor("#1f6feb"), 2, Qt.PenStyle.DashLine))
         painter.drawEllipse(ghost, 11, 11)
         painter.setPen(QColor("#1f6feb"))
-        painter.setFont(QFont("Sans Serif", 9, QFont.Weight.Bold))
+        painter.setFont(self._font(9, QFont.Weight.Bold))
         painter.drawText(QRectF(ghost.x() + 20, ghost.y() - 12, 320, 24), "preview: new commit from index")
 
     def _draw_edges(self, painter: QPainter) -> None:
         assert self._state is not None
+        lost = self._unreferenced_commits()
         for commit in self._state.commits.values():
             node = self._nodes.get(commit.oid)
             if node is None:
@@ -315,7 +349,8 @@ class CommitGraphWidget(QWidget):
                 if parent is None:
                     continue
                 same_lane = abs(node.x - parent.x) < 1
-                color = QColor("#8b98a8") if same_lane else QColor("#5b8def")
+                edge_is_lost = commit.oid in lost and parent_oid in lost
+                color = QColor(128, 137, 145, 105) if edge_is_lost else (QColor("#8b98a8") if same_lane else QColor("#5b8def"))
                 painter.setPen(QPen(color, 2.4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
                 path = QPainterPath(QPointF(node.x, node.y))
                 midpoint = (node.y + parent.y) / 2
@@ -324,6 +359,7 @@ class CommitGraphWidget(QWidget):
 
     def _draw_commits(self, painter: QPainter) -> None:
         assert self._state is not None
+        lost = self._unreferenced_commits()
         refs_by_target: dict[str, list[Reference]] = {}
         for ref in self._state.references:
             refs_by_target.setdefault(ref.target, []).append(ref)
@@ -339,8 +375,14 @@ class CommitGraphWidget(QWidget):
             self._commit_hitboxes.append((QRectF(node.x - 13, node.y - 13, 26, 26), commit))
             self._commit_hitboxes.append((QRectF(node.x - 36, node.y - 13, 26, 26), commit))
             is_head = self._state.head.oid == commit.oid
+            is_selected = commit.oid in self._selected_oids
+            is_lost = commit.oid in lost
             is_commit_target = self._is_possible_commit_drop(commit)
-            fill = QColor("#1f6feb") if is_head else QColor("#26313d")
+            fill = QColor("#1f6feb") if is_head else (QColor(112, 120, 128, 135) if is_lost else QColor("#26313d"))
+            if is_selected:
+                painter.setPen(QPen(QColor("#0969da"), 4))
+                painter.setBrush(QColor(9, 105, 218, 28))
+                painter.drawEllipse(QPointF(node.x, node.y), 15, 15)
             if is_commit_target:
                 painter.setPen(QPen(QColor("#2da44e"), 5))
                 painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -353,14 +395,38 @@ class CommitGraphWidget(QWidget):
             painter.setBrush(fill)
             painter.drawEllipse(QPointF(node.x, node.y), 9, 9)
 
-            painter.setPen(QColor("#20242a"))
-            painter.setFont(QFont("Sans Serif", 8))
+            painter.setPen(QColor(92, 99, 106, 150) if is_lost else QColor("#20242a"))
+            painter.setFont(self._font(8))
             painter.drawText(QRectF(node.x - 32, node.y - 10, 20, 20), Qt.AlignmentFlag.AlignCenter, "|||")
             label = f"{commit.short_oid}  {commit.subject}"
             painter.drawText(QRectF(node.x + 18, node.y - 12, max(240, self.width() - node.x - 38), 20), label)
 
             refs = refs_by_target.get(commit.oid, [])
             self._draw_refs(painter, refs, node.x + 18, node.y + 10)
+
+    def _unreferenced_commits(self) -> set[str]:
+        if self._state is None:
+            return set()
+        reachable: set[str] = set()
+        pending = [ref.target for ref in self._state.references]
+        if self._state.head.oid:
+            pending.append(self._state.head.oid)
+        while pending:
+            oid = pending.pop()
+            if oid in reachable:
+                continue
+            reachable.add(oid)
+            commit = self._state.commits.get(oid)
+            if commit is not None:
+                pending.extend(commit.parents)
+        return set(self._state.commits) - reachable
+
+    def _draw_selection(self, painter: QPainter) -> None:
+        if self._selection_origin is None or self._selection_rect.isNull():
+            return
+        painter.setPen(QPen(QColor("#0969da"), 1, Qt.PenStyle.DashLine))
+        painter.setBrush(QColor(9, 105, 218, 28))
+        painter.drawRect(self._selection_rect)
 
     def _draw_refs(self, painter: QPainter, refs: list[Reference], x: float, y: float) -> None:
         offset = 0.0
@@ -372,7 +438,7 @@ class CommitGraphWidget(QWidget):
                 "remote_tracking": QColor("#8250df"),
                 "tag": QColor("#bf8700"),
             }.get(ref.kind, QColor("#57606a"))
-            painter.setFont(QFont("Sans Serif", 8))
+            painter.setFont(self._font(8))
             width = painter.fontMetrics().horizontalAdvance(text) + 14
             rect = QRectF(x + offset, y, width, 20)
             if ref.kind != "head":
@@ -393,10 +459,11 @@ class CommitGraphWidget(QWidget):
         if self._drag_ref is not None:
             text = self._drag_ref.name
         elif self._drag_commit is not None:
-            text = self._drag_commit.short_oid
+            count = len(self._dragged_commits())
+            text = f"{count} commits" if count > 1 else self._drag_commit.short_oid
         else:
             return
-        painter.setFont(QFont("Sans Serif", 8, QFont.Weight.Bold))
+        painter.setFont(self._font(8, QFont.Weight.Bold))
         width = painter.fontMetrics().horizontalAdvance(text) + 18
         rect = QRectF(self._drag_pos.x() + 12, self._drag_pos.y() + 12, width, 24)
         painter.setPen(QPen(QColor("#1f6feb"), 1))
@@ -415,7 +482,7 @@ class CommitGraphWidget(QWidget):
         painter.setBrush(QColor(209, 36, 47, 90 if active else 36))
         painter.drawRoundedRect(self._trash_rect, 8, 8)
         painter.setPen(QColor("#d1242f"))
-        painter.setFont(QFont("Sans Serif", 12, QFont.Weight.Bold))
+        painter.setFont(self._font(12, QFont.Weight.Bold))
         painter.drawText(self._trash_rect, Qt.AlignmentFlag.AlignCenter, "X")
 
     def _trash_drop_rect(self) -> QRectF:
@@ -463,11 +530,19 @@ class CommitGraphWidget(QWidget):
             return
         commit = self._commit_at(event.position().toPoint())
         if commit is not None:
+            if commit.oid not in self._selected_oids:
+                self._selected_oids = {commit.oid}
             self._drag_commit = commit
             self._drag_pos = event.position().toPoint()
             self.update()
             return
-        super().mousePressEvent(event)
+        self._selection_origin = event.position()
+        self._selection_rect = QRectF(self._selection_origin, self._selection_origin)
+        self._selection_base = set(self._selected_oids) if event.modifiers() & Qt.KeyboardModifier.ControlModifier else set()
+        self._selected_oids = set(self._selection_base)
+        self.setCursor(Qt.CursorShape.CrossCursor)
+        self.update()
+        return
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
         if self._drag_ref is not None:
@@ -480,6 +555,15 @@ class CommitGraphWidget(QWidget):
             self._hover_commit = self._commit_at(event.position().toPoint())
             self.update()
             return
+        if self._selection_origin is not None:
+            self._selection_rect = QRectF(self._selection_origin, event.position()).normalized()
+            self._selected_oids = self._selection_base | {
+                commit.oid
+                for rect, commit in self._commit_hitboxes
+                if self._selection_rect.intersects(rect)
+            }
+            self.update()
+            return
         pos = event.position().toPoint()
         if self._reference_at(pos) is not None or self._commit_at(pos) is not None:
             self.setCursor(Qt.CursorShape.OpenHandCursor)
@@ -488,6 +572,14 @@ class CommitGraphWidget(QWidget):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        if self._selection_origin is not None:
+            self._selection_origin = None
+            self._selection_rect = QRectF()
+            self._selection_base.clear()
+            self.unsetCursor()
+            self.update()
+            event.accept()
+            return
         if self._drag_ref is None and self._drag_commit is None:
             super().mouseReleaseEvent(event)
             return
@@ -514,18 +606,37 @@ class CommitGraphWidget(QWidget):
                 return
         if source_commit is not None:
             release_pos = event.position().toPoint()
+            sources = self._dragged_commits(source_commit)
             if self._trash_drop_rect().contains(release_pos):
-                self.commitDroppedToTrash.emit(source_commit)
+                if len(sources) > 1:
+                    self.commitsDroppedToTrash.emit(sources)
+                else:
+                    self.commitDroppedToTrash.emit(source_commit)
                 return
             target_ref = self._reference_at(release_pos)
             if target_ref is not None:
-                self.commitDroppedOnReference.emit(source_commit, target_ref)
+                if len(sources) > 1:
+                    self.commitsDroppedOnReference.emit(sources, target_ref)
+                else:
+                    self.commitDroppedOnReference.emit(source_commit, target_ref)
                 return
             target_commit = self._commit_at(release_pos)
             if target_commit is not None and target_commit.oid != source_commit.oid:
-                self.commitDroppedOnCommit.emit(source_commit, target_commit)
+                if len(sources) > 1:
+                    self.commitsDroppedOnCommit.emit(sources, target_commit)
+                else:
+                    self.commitDroppedOnCommit.emit(source_commit, target_commit)
                 return
         super().mouseReleaseEvent(event)
+
+    def _dragged_commits(self, fallback: Optional[Commit] = None) -> list[Commit]:
+        if self._state is None:
+            return [fallback] if fallback is not None else []
+        selected = [commit for commit in self._state.commits.values() if commit.oid in self._selected_oids]
+        if selected:
+            return selected
+        commit = fallback or self._drag_commit
+        return [commit] if commit is not None else []
 
     def _commit_at(self, pos: QPoint) -> Optional[Commit]:
         for rect, commit in reversed(self._commit_hitboxes):

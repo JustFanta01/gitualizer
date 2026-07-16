@@ -553,6 +553,29 @@ class OperationPlanner:
             state_fingerprint=state_fingerprint(state),
         )
 
+    def replay_commits_after(self, state: RepositoryState, sources: list[Commit], target: Commit) -> CommandPlan:
+        ordered = _oldest_first(state, sources)
+        if not ordered:
+            raise ValueError("Select one or more commits.")
+        if any(commit.oid == target.oid for commit in ordered):
+            raise ValueError("Drop the selection onto a commit outside the selection.")
+        branch = f"gitualizer/replay-{len(ordered)}-after-{target.short_oid}"
+        if any(ref.name == branch for ref in state.local_branches):
+            branch += "-new"
+        labels = ", ".join(commit.short_oid for commit in ordered)
+        return CommandPlan(
+            title=f"Replay {len(ordered)} commits after {target.short_oid}",
+            explanation=f"Create `{branch}` at the target and replay the selected commits in chronological order.",
+            steps=[
+                CommandStep(["git", "switch", "-c", branch, target.oid], f"Create `{branch}` at the target."),
+                CommandStep(["git", "cherry-pick", *[commit.oid for commit in ordered]], f"Replay {len(ordered)} selected commits."),
+            ],
+            expected_effects=[f"A new branch `{branch}` contains copies of the selected commits after `{target.short_oid}`."],
+            preview_steps=[f"Create `{branch}` at `{target.short_oid}`.", f"Cherry-pick, oldest first: {labels}."],
+            warnings=["Cherry-pick may stop for conflicts."],
+            state_fingerprint=state_fingerprint(state),
+        )
+
     def create_branch_at_commit(self, state: RepositoryState, commit: Commit, branch: str) -> CommandPlan:
         branch = branch.strip()
         if not branch:
@@ -585,6 +608,25 @@ class OperationPlanner:
                 f"Create a new commit on `{branch.name}` with the patch from `{source.short_oid}`.",
             ],
             graph_preview=_copy_commit_to_branch_graph_preview(source.short_oid, branch.name, "cherry-pick"),
+            warnings=["Cherry-pick may stop for conflicts."],
+            state_fingerprint=state_fingerprint(state),
+        )
+
+    def cherry_pick_commits_to_branch(self, state: RepositoryState, sources: list[Commit], branch: Reference) -> CommandPlan:
+        if branch.kind != "local_branch":
+            raise ValueError("Drop commits onto a local branch.")
+        ordered = _oldest_first(state, sources)
+        if not ordered:
+            raise ValueError("Select one or more commits.")
+        return CommandPlan(
+            title=f"Cherry-pick {len(ordered)} commits onto {branch.name}",
+            explanation=f"Apply the selected commits to `{branch.name}` in chronological order.",
+            steps=[
+                CommandStep(["git", "switch", branch.name], f"Attach HEAD to `{branch.name}`."),
+                CommandStep(["git", "cherry-pick", *[commit.oid for commit in ordered]], "Apply the selected commits."),
+            ],
+            expected_effects=[f"`{branch.name}` moves forward by up to {len(ordered)} new commits."],
+            preview_steps=[f"Attach HEAD to `{branch.name}`.", "Replay the selected commits from oldest to newest."],
             warnings=["Cherry-pick may stop for conflicts."],
             state_fingerprint=state_fingerprint(state),
         )
@@ -653,6 +695,33 @@ class OperationPlanner:
             state_fingerprint=state_fingerprint(state),
         )
 
+    def drop_commits_from_current_branch(self, state: RepositoryState, sources: list[Commit]) -> CommandPlan:
+        current = _current_branch_ref(state)
+        if current is None:
+            raise ValueError("A local branch must be checked out to drop commits.")
+        ordered = _oldest_first(state, sources)
+        if not ordered or any(len(commit.parents) != 1 for commit in ordered):
+            raise ValueError("Select a sequence of single-parent commits.")
+        selected = {commit.oid for commit in ordered}
+        for older, newer in zip(ordered, ordered[1:]):
+            if older.oid not in newer.parents:
+                raise ValueError("The selected commits must form one contiguous sequence.")
+        oldest, newest = ordered[0], ordered[-1]
+        return CommandPlan(
+            title=f"Drop {len(ordered)} commits from {current.name}",
+            explanation=f"Rewrite `{current.name}` while omitting the selected contiguous commit sequence.",
+            steps=[
+                CommandStep(["git", "switch", current.name], f"Attach HEAD to `{current.name}`."),
+                CommandStep(["git", "rebase", "--onto", oldest.parents[0], newest.oid, current.name], "Replay descendants after the removed sequence."),
+            ],
+            expected_effects=[f"{len(selected)} selected commits are removed from `{current.name}` history."],
+            preview_steps=["Keep the parent before the selection.", "Omit the selected sequence.", "Replay later descendants."],
+            warnings=["This rewrites branch history and may require force-with-lease after a previous push."],
+            history_rewrite=True,
+            destructive=True,
+            state_fingerprint=state_fingerprint(state),
+        )
+
     def reset_branch_to_commit(self, state: RepositoryState, branch: Reference, commit: Commit, mode: str) -> CommandPlan:
         if branch.kind != "local_branch":
             raise ValueError("Drag a local branch onto a commit.")
@@ -687,6 +756,12 @@ def _current_branch_ref(state: RepositoryState) -> Optional[Reference]:
         if ref.name == state.head.branch:
             return ref
     return None
+
+
+def _oldest_first(state: RepositoryState, commits: list[Commit]) -> list[Commit]:
+    selected = {commit.oid for commit in commits}
+    # Repository commits are date-ordered newest first.
+    return [commit for commit in reversed(list(state.commits.values())) if commit.oid in selected]
 
 
 def _paths_for_changes(changes: list[FileChange]) -> list[str]:

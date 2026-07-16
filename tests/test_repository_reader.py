@@ -106,3 +106,17 @@ def test_commit_loading_can_be_limited(tmp_path: Path) -> None:
     assert len(state.commits) == 3
     assert state.commits_truncated is True
     assert state.commit_limit == 3
+
+
+def test_recent_unreferenced_commits_are_loaded_from_reflog(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path / "reflog")
+    write(repo, "file.txt", "base\n")
+    base = commit(repo, "base")
+    write(repo, "file.txt", "temporary\n")
+    lost = commit(repo, "temporary")
+    git(repo, "reset", "--hard", base)
+
+    state = RepositoryReader().read(repo)
+
+    assert lost in state.commits
+    assert all(ref.target != lost for ref in state.references)

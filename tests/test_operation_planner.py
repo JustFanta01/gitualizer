@@ -216,6 +216,32 @@ def test_drag_commit_onto_commit_creates_replay_branch_plan() -> None:
     assert plan.preview_steps
 
 
+def test_bulk_commit_replay_preserves_oldest_first_order() -> None:
+    repo_state = state()
+    older = Commit("c" * 40, "c" * 12, tuple(), "A", "a@example.invalid", "2024-01-01T00:00:00+00:00", "older")
+    newer = Commit("d" * 40, "d" * 12, (older.oid,), "A", "a@example.invalid", "2024-01-02T00:00:00+00:00", "newer")
+    target = Commit("e" * 40, "e" * 12, tuple(), "A", "a@example.invalid", "2023-12-01T00:00:00+00:00", "target")
+    repo_state.commits.update({newer.oid: newer, older.oid: older, target.oid: target})
+
+    plan = OperationPlanner().replay_commits_after(repo_state, [newer, older], target)
+
+    assert plan.steps[1].args == ["git", "cherry-pick", older.oid, newer.oid]
+
+
+def test_bulk_drop_requires_and_removes_a_contiguous_sequence() -> None:
+    repo_state = state()
+    base = Commit("b" * 40, "b" * 12, tuple(), "A", "a@example.invalid", "2024-01-01T00:00:00+00:00", "base")
+    older = Commit("c" * 40, "c" * 12, (base.oid,), "A", "a@example.invalid", "2024-01-02T00:00:00+00:00", "older")
+    newer = Commit("d" * 40, "d" * 12, (older.oid,), "A", "a@example.invalid", "2024-01-03T00:00:00+00:00", "newer")
+    repo_state.commits.update({newer.oid: newer, older.oid: older, base.oid: base})
+
+    plan = OperationPlanner().drop_commits_from_current_branch(repo_state, [newer, older])
+
+    assert plan.steps[1].args == ["git", "rebase", "--onto", base.oid, newer.oid, "main"]
+    assert plan.history_rewrite is True
+    assert plan.destructive is True
+
+
 def test_drop_commit_on_branch_can_cherry_pick_or_revert() -> None:
     repo_state = state()
     source = Commit("b" * 40, "b" * 12, tuple(), "A", "a@example.invalid", "2024-01-01T00:00:00+00:00", "source")
