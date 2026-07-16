@@ -20,6 +20,13 @@ shows the exact Git commands and their expected effects, and asks for
 confirmation. Destructive, remote, and history-rewriting operations are marked
 clearly.
 
+The graph has three layouts under **View**:
+
+- **Commits** shows the commit history and reference labels;
+- **Branches** provides a branch-focused overview;
+- **Local vs Remote** places local and remote-tracking branches side by side
+  and shows their ahead/behind relationship.
+
 ## Run
 
 Gitualizer requires Python 3.9 or newer.
@@ -57,6 +64,62 @@ Run the tests with:
 pytest
 ```
 
+## Refresh, fetch, and authentication
+
+The buttons next to the repository path have separate responsibilities:
+
+- **Refresh** rereads local repository state. It is green, matching local
+  branch labels.
+- **Fetch** contacts configured remotes and updates remote-tracking references
+  such as `origin/main`. It is purple, matching remote-tracking labels.
+
+Auto Refresh rereads local state every 2.5 seconds. Auto Fetch Remotes runs
+every 60 seconds. Both are enabled by default and can be changed under
+**Preferences**. A refresh never contacts a remote; a fetch does not move local
+branches.
+
+The first fetch after opening a repository is interactive. Gitualizer displays
+an alert asking the user to check the terminal that launched the application.
+Git, SSH, or the configured credential helper owns the prompt. Gitualizer does
+not read, store, log, or replay private-key passwords, HTTPS passwords, or
+tokens.
+
+After successful authentication, Git and SSH are configured to keep a
+short-lived, five-minute session for background fetches:
+
+- SSH uses OpenSSH connection persistence;
+- HTTPS uses Git's in-memory credential cache.
+
+Background fetch is non-interactive while that session is available. If
+authentication expires, Gitualizer marks authentication as required and can
+open the terminal authentication flow again. Prompts are rate-limited to avoid
+continuous interruptions.
+
+The clickable authentication badge in the status bar reports whether access is
+not checked, authorized, required, or unavailable. After a successful remote
+command it also shows the elapsed time since the last authorization. Clicking
+the badge explains the boundary between Gitualizer and the external
+authentication tools.
+
+## Command preview and history
+
+The collapsible bottom area is split into an operation preview and a complete
+command history.
+
+The history records every subprocess Gitualizer directly launches, including
+automatic repository reads such as `status`, `log`, and `for-each-ref`, as well
+as fetches and confirmed modifying commands. A command appears when it starts
+and is updated when it finishes. Entries contain a compact `HH:MM:SS` timestamp,
+the command, working directory, execution mode, exit code, stdout, and stderr.
+
+**Show stdout and execution details** is off by default. When it is off, the
+history shows only the timestamp and bold, colored command. Errors are always
+shown in red. When enabled, stdout and execution details appear in gray.
+
+Interactive commands inherit their streams from the terminal, so their input
+and output are intentionally not captured. Their command line and exit status
+are still included in the history.
+
 ## How the application works
 
 The main flow is:
@@ -71,7 +134,9 @@ Git CLI
   -> OperationPlanner
   -> CommandPlan and confirmation
   -> CommandExecutor
-  -> Git CLI
+  -> GitRunner
+       -> Git CLI
+       -> command events -> Complete Command History
 ```
 
 ### Signals and the observer pattern
@@ -103,13 +168,13 @@ signal/slot implementation rather than maintaining its own observer list.
 ```text
 src/gitualizer/
   app/main.py                 Application entry point
-  git/runner.py               Safe subprocess wrapper for Git
+  git/runner.py               Git subprocess, authentication, and command events
   git/repository.py           Reads and normalizes repository data
   model/repository_state.py   Repository dataclasses
   operations/command_plan.py  Planned commands and execution results
   operations/planner.py       Converts user intent into Git plans
   operations/executor.py      Executes confirmed plans
-  ui/main_window.py           Coordination, menus, and dialogs
+  ui/main_window.py           Coordination, menus, dialogs, status, and history
   ui/graph_widget.py          Painted graph and graph interactions
   ui/file_status_widget.py    Working tree and staging interactions
   ui/stash_widget.py          Draggable stash list
@@ -118,7 +183,9 @@ src/gitualizer/
 
 ### Git and model layers
 
-`GitRunner` runs Git with argument lists instead of shell command strings.
+`GitRunner` runs Git with argument lists instead of shell command strings. It
+also emits start and finish events for the complete command history and
+configures short-lived Git/SSH authentication sessions for remote commands.
 `RepositoryReader` uses it to read HEAD, commits, reflogs, branches, tags,
 remotes, stashes, file changes, and operations in progress.
 
@@ -144,8 +211,9 @@ it. Dropping it onto the graph trash runs `git stash drop`, which deletes the
 stash without applying its files.
 
 References, Stashes, and Remotes share the right side through tabs. Stashes is
-the initial tab, and **View → Open Stashes** selects it. The bottom command
-preview is collapsible when more graph or panel space is needed.
+the initial tab, and **View → Open Stashes** selects it. The bottom area contains
+the command preview and live command history, and is collapsible when more graph
+or panel space is needed.
 
 Cross-component dragging uses the MIME names in `ui/drag_mime.py`. The source
 widget writes a small payload to `QMimeData`; the destination widget decodes it
@@ -167,7 +235,9 @@ changed after the preview was created, execution is refused. This prevents a
 stale plan from running against a different repository state.
 
 `CommandExecutor` runs the confirmed steps, stops on failure, and returns the
-results to the UI.
+results to the UI. User-initiated remote commands inherit terminal input and
+output so authentication remains owned by Git/SSH. Non-interactive background
+fetches use the short-lived session created by an interactive command.
 
 Stash plans follow the same path as graph plans. Creating a stash uses selected
 working-tree paths, applying keeps the stash available, and deleting a stash is
@@ -198,6 +268,10 @@ Do not execute Git from the graph widget.
 
 Most operations do not require changes to `CommandExecutor`.
 
+Commands that can contact a remote are classified centrally by the executor.
+Keep new remote operations on this execution path so they receive the standard
+terminal authentication alert and are included in command history.
+
 ### Add repository data
 
 1. Add or extend a dataclass in `model/repository_state.py`.
@@ -225,4 +299,5 @@ Prefer testing at the lowest responsible layer:
 
 - Git parsing in repository-reader tests;
 - command behavior in planner tests;
+- authentication and command events in runner/executor tests;
 - pure formatting and UI helpers in focused UI tests.
