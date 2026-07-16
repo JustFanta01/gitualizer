@@ -3,11 +3,10 @@ from __future__ import annotations
 import html
 from pathlib import Path
 import shlex
-import threading
 import time
 from typing import Callable, Optional
 
-from PySide6.QtCore import QTimer, Qt, Signal
+from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QAction, QFont
 from PySide6.QtWidgets import (
     QApplication,
@@ -40,7 +39,7 @@ from PySide6.QtWidgets import (
 )
 
 from gitualizer.git.repository import RepositoryReader
-from gitualizer.git.runner import AUTH_SESSION_SECONDS, CommandEvent, GitError, GitResult, remote_auth_environment
+from gitualizer.git.runner import AUTH_SESSION_SECONDS, CommandEvent, GitError, remote_auth_environment
 from gitualizer.model.repository_state import Commit, FileChange, Reference, RepositoryState, Stash
 from gitualizer.operations.command_plan import CommandPlan, ExecutionResult
 from gitualizer.operations.executor import CommandExecutor
@@ -51,9 +50,6 @@ from gitualizer.ui.stash_widget import StashWidget
 
 
 class MainWindow(QMainWindow):
-    commandEventReceived = Signal(object)
-    fetchFinished = Signal(object, bool)
-
     def __init__(self, initial_path: Optional[Path] = None, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.reader = RepositoryReader()
@@ -68,7 +64,6 @@ class MainWindow(QMainWindow):
         self.auth_state = "not_checked"
         self.last_authorized_at: Optional[float] = None
         self.last_interactive_auth_attempt: Optional[float] = None
-        self._terminal_alert: Optional[QMessageBox] = None
         self.ui_scale = 1.0
         self._base_application_font = QApplication.font()
         self.setWindowTitle("Gitualizer")
@@ -185,10 +180,8 @@ class MainWindow(QMainWindow):
         self.auth_elapsed_timer.setInterval(1000)
         self.auth_elapsed_timer.timeout.connect(self._update_auth_status_label)
         self.auth_elapsed_timer.start()
-        self.commandEventReceived.connect(self._append_command_event)
-        self.fetchFinished.connect(self._finish_fetch)
-        self.reader.runner.set_observer(self.commandEventReceived.emit)
-        self.executor.runner.set_observer(self.commandEventReceived.emit)
+        self.reader.runner.set_observer(self._append_command_event)
+        self.executor.runner.set_observer(self._append_command_event)
         self._build_menus()
 
         self.open_button.clicked.connect(self._browse)
@@ -480,93 +473,75 @@ class MainWindow(QMainWindow):
         )
 
     def _interactive_fetch(self) -> None:
-        self._start_fetch(interactive=True)
-
-    def _auto_fetch(self) -> None:
-        self._start_fetch(interactive=False)
-
-    def _start_fetch(self, *, interactive: bool) -> None:
-        if (
-            (not interactive and not self.auto_fetch_enabled)
-            or self.state is None
-            or self.fetch_in_progress
-            or not self.state.remotes
-        ):
+        if self.state is None or self.fetch_in_progress or not self.state.remotes:
             return
         self.fetch_in_progress = True
+        self.last_interactive_auth_attempt = time.monotonic()
         repository_path = self.state.path
-        if interactive:
-            self.last_interactive_auth_attempt = time.monotonic()
-            self._terminal_alert = self._show_terminal_alert("fetching remotes")
-            self.statusBar().showMessage(
-                "Fetching remotes in the background; check the terminal if authentication is requested."
+        terminal_alert = self._show_terminal_alert("fetching remotes")
+        self.statusBar().showMessage("Fetching remotes; complete any authentication prompt from Git/SSH...")
+        try:
+            # Do not provide an askpass program, redirect standard input, or
+            # inspect the environment. Git/SSH and the user's credential
+            # helper own the complete authentication exchange.
+            result = self.reader.runner.run_interactive(
+                ["fetch", "--all", "--prune"],
+                cwd=repository_path,
+                env=remote_auth_environment(interactive=True),
             )
-        else:
-            self.statusBar().showMessage("Checking remotes in the background...")
-
-        def run_fetch() -> None:
-            try:
-                if interactive:
-                    result = self.reader.runner.run_interactive(
-                        ["fetch", "--all", "--prune"],
-                        cwd=repository_path,
-                        env=remote_auth_environment(interactive=True),
-                        timeout=20,
-                    )
-                else:
-                    result = self.reader.runner.run(
-                        ["fetch", "--all", "--prune"],
-                        cwd=repository_path,
-                        check=False,
-                        env={
-                            "GIT_TERMINAL_PROMPT": "0",
-                            "GIT_ASKPASS": "echo",
-                            "SSH_ASKPASS": "echo",
-                            **remote_auth_environment(interactive=False),
-                        },
-                        timeout=15,
-                    )
-            except OSError as exc:
-                result = GitResult(
-                    ["git", "fetch", "--all", "--prune"],
-                    repository_path,
-                    "",
-                    str(exc),
-                    126,
-                )
-            self.fetchFinished.emit(result, interactive)
-
-        threading.Thread(target=run_fetch, name="gitualizer-fetch", daemon=True).start()
-
-    def _finish_fetch(self, result: GitResult, interactive: bool) -> None:
-        if interactive and self._terminal_alert is not None:
-            self._terminal_alert.hide()
-            self._terminal_alert.deleteLater()
-            self._terminal_alert = None
-        self.fetch_in_progress = False
-        self.fetch_timer.start()
-
-        if result.returncode == 0:
-            self._set_auth_status("authorized")
-            self.statusBar().showMessage("Remote-tracking branches updated.", 4000)
-            if self.state is not None and result.cwd == self.state.path:
+            if result.returncode == 0:
+                self._set_auth_status("authorized")
+                self.statusBar().showMessage("Remote-tracking branches updated.", 4000)
                 self.refresh(show_errors=False)
+            else:
+                self._set_auth_status("required")
+                self.statusBar().showMessage(
+                    "Fetch was not completed. Authenticate and use File > Fetch Remotes to retry.",
+                    10000,
+                )
+        finally:
+            terminal_alert.hide()
+            terminal_alert.deleteLater()
+            self.fetch_in_progress = False
+            self.fetch_timer.start()
+
+    def _auto_fetch(self) -> None:
+        if not self.auto_fetch_enabled or self.state is None or self.fetch_in_progress or not self.state.remotes:
             return
-
-        auth_failed = _looks_like_auth_failure(result.stderr)
-        self._set_auth_status("required" if auth_failed else "unavailable")
-        if result.returncode == 124:
-            message = "Remote fetch timed out. Gitualizer remains available offline."
-        else:
-            detail = result.stderr.strip().splitlines()
-            reason = detail[-1] if detail else "the remote could not be reached"
-            message = f"Remote unavailable: {reason}. Gitualizer remains available offline."
-        self.statusBar().showMessage(message, 12000)
-
-        if not interactive and auth_failed:
-            last_attempt = self.last_interactive_auth_attempt
-            if last_attempt is None or time.monotonic() - last_attempt >= AUTH_SESSION_SECONDS:
-                QTimer.singleShot(0, self._interactive_fetch)
+        self.fetch_in_progress = True
+        try:
+            result = self.reader.runner.run(
+                ["fetch", "--all", "--prune"],
+                cwd=self.state.path,
+                check=False,
+                env={
+                    "GIT_TERMINAL_PROMPT": "0",
+                    "GIT_ASKPASS": "echo",
+                    "SSH_ASKPASS": "echo",
+                    **remote_auth_environment(interactive=False),
+                },
+                timeout=45,
+            )
+            if result.returncode == 0:
+                self._set_auth_status("authorized")
+                self.statusBar().showMessage("Remote-tracking branches updated.", 4000)
+                self.refresh(show_errors=False)
+            else:
+                auth_failed = _looks_like_auth_failure(result.stderr)
+                self._set_auth_status("required" if auth_failed else "unavailable")
+                detail = result.stderr.strip().splitlines()
+                message = detail[-1] if detail else "Git fetch failed."
+                self.statusBar().showMessage(f"Auto-fetch failed: {message}", 10000)
+                last_attempt = self.last_interactive_auth_attempt
+                if auth_failed and (
+                    last_attempt is None or time.monotonic() - last_attempt >= AUTH_SESSION_SECONDS
+                ):
+                    QTimer.singleShot(0, self._interactive_fetch)
+        finally:
+            self.fetch_in_progress = False
+            # Count the next interval from the end of this fetch, including
+            # the immediate fetch performed when a repository is opened.
+            self.fetch_timer.start()
 
     def refresh(self, show_errors: bool = True) -> None:
         if self.refresh_in_progress:
