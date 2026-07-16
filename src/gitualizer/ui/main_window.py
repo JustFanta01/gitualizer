@@ -371,6 +371,9 @@ class MainWindow(QMainWindow):
             QApplication.processEvents()
 
     def _render_command_history(self) -> None:
+        scroll_bar = self.command_history.verticalScrollBar()
+        was_at_bottom = scroll_bar.value() == scroll_bar.maximum()
+        previous_scroll_value = scroll_bar.value()
         show_details = self.show_command_stdout.isChecked()
         entries: list[str] = []
         for event in self.command_history_events:
@@ -393,9 +396,9 @@ class MainWindow(QMainWindow):
                 if event.interactive and event.phase == "finished":
                     details += (
                         "<div style='color:#8c959f; margin-left:12px;'>"
-                        "stdin/stdout/stderr inherited by terminal; credentials are not captured</div>"
+                        "authentication input inherited by terminal; output copied to history</div>"
                     )
-                elif event.stdout:
+                if event.stdout:
                     stdout = html.escape(event.stdout.replace("\0", "\\0"))
                     details += f"<pre style='color:#6e7781; margin:3px 0 3px 12px;'>{stdout}</pre>"
             if event.stderr:
@@ -403,7 +406,8 @@ class MainWindow(QMainWindow):
                 details += f"<pre style='color:#cf222e; margin:3px 0 3px 12px;'>{stderr}</pre>"
             entries.append(f"<div style='margin-bottom:9px;'>{header}{details}</div>")
         self.command_history.setHtml("".join(entries))
-        self.command_history.verticalScrollBar().setValue(self.command_history.verticalScrollBar().maximum())
+        scroll_bar = self.command_history.verticalScrollBar()
+        scroll_bar.setValue(scroll_bar.maximum() if was_at_bottom else previous_scroll_value)
 
     def _browse(self) -> None:
         selected = QFileDialog.getExistingDirectory(self, "Open Git Repository", self.path_edit.text())
@@ -728,7 +732,6 @@ class MainWindow(QMainWindow):
         needs_terminal_auth = self.executor.requires_terminal_auth(plan)
         terminal_alert = self._show_terminal_alert("contacting the remote") if needs_terminal_auth else None
         if needs_terminal_auth:
-            self._set_auth_status("authorized" if result.success else "unavailable")
             self.statusBar().showMessage(
                 "Contacting remote; complete any authentication prompt from Git/SSH..."
             )
@@ -739,6 +742,7 @@ class MainWindow(QMainWindow):
                 terminal_alert.hide()
                 terminal_alert.deleteLater()
         if needs_terminal_auth:
+            self._set_auth_status("authorized" if result.success else "unavailable")
             self.statusBar().showMessage(
                 "Remote command completed."
                 if result.success
