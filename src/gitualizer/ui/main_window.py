@@ -335,6 +335,15 @@ class MainWindow(QMainWindow):
             return
         self.fetch_in_progress = True
         repository_path = self.state.path
+        terminal_alert = QMessageBox(self)
+        terminal_alert.setIcon(QMessageBox.Icon.Information)
+        terminal_alert.setWindowTitle("Action Required in Terminal")
+        terminal_alert.setText("Git is waiting for input in the terminal.")
+        terminal_alert.setInformativeText(
+            "Check the terminal that launched Gitualizer and complete the Git/SSH authentication prompt there."
+        )
+        terminal_alert.setStandardButtons(QMessageBox.StandardButton.NoButton)
+        terminal_alert.show()
         self.statusBar().showMessage("Fetching remotes; complete any authentication prompt from Git/SSH...")
         QApplication.processEvents()
         try:
@@ -354,6 +363,8 @@ class MainWindow(QMainWindow):
                     10000,
                 )
         finally:
+            terminal_alert.hide()
+            terminal_alert.deleteLater()
             self.fetch_in_progress = False
             self.fetch_timer.start()
 
