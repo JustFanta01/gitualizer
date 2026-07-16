@@ -89,7 +89,12 @@ def test_auth_status_tracks_remote_commands_and_elapsed_time(monkeypatch) -> Non
     window._update_auth_status_label()
 
     assert window.auth_state == "authenticated"
-    assert window.auth_status_button.text() == "Auth: Authenticated. (Last auth 34 sec ago.)"
+    assert window.auth_status_button.text() == "Auth: Authenticated."
+    details = window._auth_details_html()
+    assert "Last terminal authentication command:</span> 34 sec ago" in details
+    assert "Last command using remote authentication:</span> 34 sec ago" in details
+    assert "#0969da" in details
+    assert "#8250df" in details
     window.close()
     assert app is not None
 

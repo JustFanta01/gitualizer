@@ -67,6 +67,7 @@ class MainWindow(QMainWindow):
         self._terminal_alert: Optional[QMessageBox] = None
         self.auth_state = "not_checked"
         self.last_auth_command_at: Optional[float] = None
+        self.last_remote_command_at: Optional[float] = None
         self.ui_scale = 1.0
         self._base_application_font = QApplication.font()
         self.setWindowTitle("Gitualizer")
@@ -175,10 +176,6 @@ class MainWindow(QMainWindow):
         self.auth_status_button.setProperty("authState", "not_checked")
         self.auth_status_button.setToolTip("Remote authentication is handled entirely by Git and the terminal.")
         self.statusBar().addPermanentWidget(self.auth_status_button)
-        self.auth_elapsed_timer = QTimer(self)
-        self.auth_elapsed_timer.setInterval(1000)
-        self.auth_elapsed_timer.timeout.connect(self._update_auth_status_label)
-        self.auth_elapsed_timer.start()
         self.commandEventReceived.connect(self._append_command_event)
         self.fetchFinished.connect(self._finish_fetch)
         self.reader.runner.set_observer(self.commandEventReceived.emit)
@@ -362,6 +359,7 @@ class MainWindow(QMainWindow):
     def _append_command_event(self, event: CommandEvent) -> None:
         if event.phase == "started" and event.interactive:
             self.last_auth_command_at = time.monotonic()
+            self.last_remote_command_at = self.last_auth_command_at
             if self.auth_state != "authenticated":
                 self._set_auth_status("required")
             return
@@ -412,22 +410,42 @@ class MainWindow(QMainWindow):
             "authenticated": "Authenticated",
             "unavailable": "Unavailable",
         }
-        text = f"Auth: {labels[self.auth_state]}."
-        if self.last_auth_command_at is not None:
-            elapsed = max(0, int(time.monotonic() - self.last_auth_command_at))
-            text += f" (Last auth {elapsed} sec ago.)"
-        self.auth_status_button.setText(text)
+        self.auth_status_button.setText(f"Auth: {labels[self.auth_state]}.")
+
+    def _auth_details_html(self) -> str:
+        def elapsed(timestamp: Optional[float]) -> str:
+            if timestamp is None:
+                return "Not used yet"
+            seconds = max(0, int(time.monotonic() - timestamp))
+            return f"{seconds} sec ago"
+
+        return (
+            "Gitualizer never reads, redirects, or stores an SSH passphrase, HTTPS password, or token. "
+            "Interactive authentication belongs to Git, SSH, and the external terminal.<br><br>"
+            f"Git's credential cache and SSH connection sharing may reuse authentication for "
+            f"{AUTH_SESSION_SECONDS // 60} minutes.<br><br>"
+            "<span style='color:#0969da; font-weight:700;'>Last terminal authentication command:</span> "
+            f"{elapsed(self.last_auth_command_at)}<br>"
+            "<span style='color:#8250df; font-weight:700;'>Last command using remote authentication:</span> "
+            f"{elapsed(self.last_remote_command_at)}"
+        )
+
+    def _create_auth_alert(self, *, show_details: bool) -> QMessageBox:
+        alert = QMessageBox(self)
+        alert.setIcon(QMessageBox.Icon.Information)
+        alert.setWindowTitle("Remote Authentication")
+        alert.setText("Git may require authentication in the terminal.")
+        alert.setInformativeText(
+            self._auth_details_html()
+            if show_details
+            else "Use the terminal that launched Gitualizer. Gitualizer does not read or redirect credentials."
+        )
+        return alert
 
     def _show_auth_explanation(self) -> None:
-        QMessageBox.information(
-            self,
-            "Remote Authentication",
-            "Gitualizer never reads, redirects, or stores an SSH passphrase, HTTPS password, or token. "
-            "Interactive authentication belongs to Git, SSH, and the external terminal.\n\n"
-            f"Gitualizer asks Git's credential cache and SSH connection sharing to reuse an authenticated "
-            f"session for {AUTH_SESSION_SECONDS // 60} minutes. The external helper owns the credential; "
-            "Gitualizer only observes whether remote commands succeed.",
-        )
+        alert = self._create_auth_alert(show_details=True)
+        alert.setStandardButtons(QMessageBox.StandardButton.Ok)
+        alert.exec()
 
     def _browse(self) -> None:
         selected = QFileDialog.getExistingDirectory(self, "Open Git Repository", self.path_edit.text())
@@ -466,13 +484,7 @@ class MainWindow(QMainWindow):
         self.fetch_in_progress = True
         repository_path = self.state.path
         if interactive:
-            self._terminal_alert = QMessageBox(self)
-            self._terminal_alert.setIcon(QMessageBox.Icon.Information)
-            self._terminal_alert.setWindowTitle("Action Required in Terminal")
-            self._terminal_alert.setText("Git may require authentication in the terminal.")
-            self._terminal_alert.setInformativeText(
-                "Use the terminal that launched Gitualizer. Gitualizer does not read or redirect credentials."
-            )
+            self._terminal_alert = self._create_auth_alert(show_details=False)
             self._terminal_alert.setStandardButtons(QMessageBox.StandardButton.NoButton)
             self._terminal_alert.show()
             self.statusBar().showMessage(
@@ -517,6 +529,7 @@ class MainWindow(QMainWindow):
         threading.Thread(target=run_fetch, name="gitualizer-fetch", daemon=True).start()
 
     def _finish_fetch(self, result: GitResult, interactive: bool) -> None:
+        self.last_remote_command_at = time.monotonic()
         if interactive and self._terminal_alert is not None:
             self._terminal_alert.hide()
             self._terminal_alert.deleteLater()
@@ -570,6 +583,10 @@ class MainWindow(QMainWindow):
             self.refresh_in_progress = False
             return
         self._clear_path_error()
+        full_repository_path = str(self.state.path.resolve())
+        if self.path_edit.text() != full_repository_path:
+            self.path_edit.setText(full_repository_path)
+        self.path_edit.setToolTip(full_repository_path)
         self.graph.set_state(self.state)
         self._set_summary(self.state)
         self._set_changes(self.state.changes)
@@ -581,6 +598,7 @@ class MainWindow(QMainWindow):
         self.refresh_in_progress = False
         if self.state.path != previous_path:
             self.last_auth_command_at = None
+            self.last_remote_command_at = None
             self._set_auth_status("not_checked")
             # Authenticate through Git/SSH once when a repository is opened.
             # Later timer fetches are non-interactive and can never prompt.
@@ -604,6 +622,7 @@ class MainWindow(QMainWindow):
     def _clear_repository_state(self) -> None:
         self.state = None
         self.last_auth_command_at = None
+        self.last_remote_command_at = None
         self._set_auth_status("not_checked")
         self.graph.set_state(None)
         self.graph.set_preview_plan(None)
