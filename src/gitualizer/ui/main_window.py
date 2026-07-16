@@ -69,6 +69,10 @@ class MainWindow(QMainWindow):
         self.path_edit.textChanged.connect(self._clear_path_error)
         self.open_button = QPushButton("Browse")
         self.refresh_button = QPushButton("Refresh")
+        self.refresh_button.setObjectName("refreshButton")
+        self.fetch_button = QPushButton("Fetch")
+        self.fetch_button.setObjectName("fetchButton")
+        self.fetch_button.setToolTip("Fetch remotes; Git/SSH may ask you to authenticate.")
 
         top = QHBoxLayout()
         top.setSpacing(8)
@@ -76,6 +80,7 @@ class MainWindow(QMainWindow):
         top.addWidget(self.path_edit, 1)
         top.addWidget(self.open_button)
         top.addWidget(self.refresh_button)
+        top.addWidget(self.fetch_button)
 
         self.graph = CommitGraphWidget()
         graph_scroll = QScrollArea()
@@ -141,6 +146,7 @@ class MainWindow(QMainWindow):
 
         self.open_button.clicked.connect(self._browse)
         self.refresh_button.clicked.connect(self.refresh)
+        self.fetch_button.clicked.connect(self._interactive_fetch)
         self.path_edit.returnPressed.connect(self.refresh)
         self.graph.referenceDropped.connect(self._handle_reference_drop)
         self.graph.referenceDroppedOnCommit.connect(self._handle_reference_drop_on_commit)
@@ -448,6 +454,7 @@ class MainWindow(QMainWindow):
 
     def _set_enabled(self, enabled: bool) -> None:
         self.graph.setEnabled(enabled)
+        self.fetch_button.setEnabled(enabled)
 
     def _refresh_controls(self, state: RepositoryState) -> None:
         return
@@ -1422,7 +1429,28 @@ QPushButton {
 QPushButton:hover {
     background: #1a5fd0;
 }
+QPushButton#refreshButton {
+    background: #1a7f37;
+}
+QPushButton#refreshButton:hover {
+    background: #176f31;
+}
+QPushButton#refreshButton:pressed {
+    background: #125c28;
+}
+QPushButton#fetchButton {
+    background: #8250df;
+}
+QPushButton#fetchButton:hover {
+    background: #7042c5;
+}
+QPushButton#fetchButton:pressed {
+    background: #5e35aa;
+}
 QPushButton:disabled {
+    background: #a9b6c5;
+}
+QPushButton#refreshButton:disabled, QPushButton#fetchButton:disabled {
     background: #a9b6c5;
 }
 QHeaderView::section {
