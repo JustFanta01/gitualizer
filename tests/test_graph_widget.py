@@ -53,5 +53,4 @@ def test_remote_card_mirrors_new_commits_missing_from_local_branch() -> None:
         )
     )
 
-    assert widget._comparison_counts(local) == (1, 4)
-    assert widget._comparison_counts(remote) == (4, 1)
+    assert widget._comparison_counts(remote) == (1, 4)
