@@ -76,8 +76,18 @@ class CommitGraphWidget(QWidget):
         row_count = max(len(self._nodes), 8)
         lane_count = max((int(node.x) for node in self._nodes.values()), default=1)
         self.setMinimumHeight(int(84 + row_count * self._row_spacing * self._zoom))
-        self.setMinimumWidth(max(500, lane_count + 420))
+        self.setMinimumWidth(self._minimum_canvas_width(lane_count))
         self.update()
+
+    def _minimum_canvas_width(self, lane_count: int = 1) -> int:
+        if self._mode == "local_remote":
+            # Two 280px cards, the gutter between them, and both outer gutters.
+            # Keep this in sync with _draw_branch_overview so its right edge is
+            # part of the scrollable widget after every refresh/fetch.
+            return 656
+        if self._mode == "branches":
+            return 680
+        return max(500, lane_count + 420)
 
     def set_visualization(self, *, row_spacing: Optional[int] = None, lane_spacing: Optional[int] = None, zoom: Optional[float] = None) -> None:
         if row_spacing is not None:
@@ -105,10 +115,8 @@ class CommitGraphWidget(QWidget):
 
     def set_mode(self, mode: str) -> None:
         self._mode = mode
-        if mode == "local_remote":
-            self.setMinimumWidth(760)
-        elif mode == "branches":
-            self.setMinimumWidth(680)
+        lane_count = max((int(node.x) for node in self._nodes.values()), default=1)
+        self.setMinimumWidth(self._minimum_canvas_width(lane_count))
         self.update()
 
     def set_viewport(self, x: int, y: int, width: int, height: int) -> None:
@@ -185,7 +193,7 @@ class CommitGraphWidget(QWidget):
         if include_remote_columns:
             gutter = 34.0
             column_gap = 28.0
-            available = max(640.0, float(self.width()) - gutter * 2 - column_gap)
+            available = max(560.0, float(self.width()) - gutter * 2 - column_gap)
             card_width = max(280.0, available / 2)
             columns = [
                 ("Local branches", self._state.local_branches, gutter, card_width),
@@ -246,19 +254,39 @@ class CommitGraphWidget(QWidget):
             meta = f"{meta}  cache of {remote}:{branch}"
         meta_text = painter.fontMetrics().elidedText(meta, Qt.TextElideMode.ElideRight, int(width - 18))
         painter.drawText(rect.adjusted(8, 20, -10, -3), Qt.AlignmentFlag.AlignVCenter, meta_text)
-        if ref.behind and ref.behind > 0:
+        ahead, behind = self._comparison_counts(ref)
+        if behind and behind > 0:
             painter.setBrush(QColor("#2da44e"))
             painter.setPen(QPen(QColor("#ffffff"), 1))
             painter.drawEllipse(QPointF(x + width - 22, y + 18), 8, 8)
             painter.setPen(QColor("#ffffff"))
             painter.setFont(self._font(7, QFont.Weight.Bold))
-            painter.drawText(QRectF(x + width - 30, y + 10, 16, 16), Qt.AlignmentFlag.AlignCenter, str(ref.behind))
-        if include_remote_columns and ref.ahead and ref.ahead > 0:
+            painter.drawText(QRectF(x + width - 30, y + 10, 16, 16), Qt.AlignmentFlag.AlignCenter, str(behind))
+        if include_remote_columns and ahead and ahead > 0:
             painter.setBrush(QColor("#d1242f"))
             painter.setPen(QPen(QColor("#ffffff"), 1))
             painter.drawEllipse(QPointF(x + width - 44, y + 18), 8, 8)
             painter.setPen(QColor("#ffffff"))
-            painter.drawText(QRectF(x + width - 52, y + 10, 16, 16), Qt.AlignmentFlag.AlignCenter, str(ref.ahead))
+            painter.drawText(QRectF(x + width - 52, y + 10, 16, 16), Qt.AlignmentFlag.AlignCenter, str(ahead))
+
+    def _comparison_counts(self, ref: Reference) -> tuple[Optional[int], Optional[int]]:
+        """Return local-ahead/remote-ahead counts for a branch card.
+
+        Git records upstream divergence on the local branch. Mirror those
+        values onto its remote-tracking card so the remote column explicitly
+        shows commits discovered by fetch that are missing locally.
+        """
+        if ref.kind != "remote_tracking" or self._state is None:
+            return ref.ahead, ref.behind
+        tracking = [local for local in self._state.local_branches if local.upstream == ref.name]
+        if not tracking:
+            return ref.ahead, ref.behind
+        ahead_values = [local.ahead for local in tracking if local.ahead is not None]
+        behind_values = [local.behind for local in tracking if local.behind is not None]
+        return (
+            max(ahead_values) if ahead_values else ref.ahead,
+            max(behind_values) if behind_values else ref.behind,
+        )
 
     def _draw_empty(self, painter: QPainter, text: str) -> None:
         painter.setPen(QColor("#666a73"))
