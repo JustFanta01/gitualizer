@@ -77,9 +77,9 @@ class CommitGraphWidget(QWidget):
 
     def set_visualization(self, *, row_spacing: Optional[int] = None, lane_spacing: Optional[int] = None, zoom: Optional[float] = None) -> None:
         if row_spacing is not None:
-            self._row_spacing = max(30, min(110, row_spacing))
+            self._row_spacing = max(24, min(240, row_spacing))
         if lane_spacing is not None:
-            self._lane_spacing = max(48, min(160, lane_spacing))
+            self._lane_spacing = max(40, min(400, lane_spacing))
         if zoom is not None:
             self._zoom = max(0.65, min(1.75, zoom))
         self._nodes = self._layout_nodes(self._state)

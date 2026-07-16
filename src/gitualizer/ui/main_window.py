@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import html
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QAction, QFont
@@ -24,12 +24,14 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QSpinBox,
     QSplitter,
     QTableWidgetItem,
     QTextBrowser,
     QTextEdit,
     QVBoxLayout,
     QWidget,
+    QWidgetAction,
 )
 
 from gitualizer.git.repository import RepositoryReader
@@ -186,14 +188,24 @@ class MainWindow(QMainWindow):
         view_menu.addAction("Graph Layout: Local vs Remote", self._local_remote_layout)
         view_menu.addSeparator()
         graph_options = view_menu.addMenu("Graph Visualization")
-        width_menu = graph_options.addMenu("Lane Width")
-        width_menu.addAction("Compact", lambda: self.graph.set_visualization(lane_spacing=56))
-        width_menu.addAction("Comfortable", lambda: self.graph.set_visualization(lane_spacing=72))
-        width_menu.addAction("Wide", lambda: self.graph.set_visualization(lane_spacing=108))
-        height_menu = graph_options.addMenu("Row Height")
-        height_menu.addAction("Compact", lambda: self.graph.set_visualization(row_spacing=38))
-        height_menu.addAction("Comfortable", lambda: self.graph.set_visualization(row_spacing=52))
-        height_menu.addAction("Tall", lambda: self.graph.set_visualization(row_spacing=76))
+        self.lane_width_spin = self._graph_spacing_control(
+            graph_options,
+            "Lane width",
+            value=72,
+            minimum=40,
+            maximum=400,
+            step=8,
+            changed=lambda value: self.graph.set_visualization(lane_spacing=value),
+        )
+        self.row_height_spin = self._graph_spacing_control(
+            graph_options,
+            "Row height",
+            value=52,
+            minimum=24,
+            maximum=240,
+            step=4,
+            changed=lambda value: self.graph.set_visualization(row_spacing=value),
+        )
         view_menu.addSeparator()
         scale_menu = view_menu.addMenu("Interface Scale")
         zoom_in = scale_menu.addAction("Increase Size", lambda: self._change_ui_scale(0.1))
@@ -222,6 +234,33 @@ class MainWindow(QMainWindow):
 
         help_menu = self.menuBar().addMenu("Help")
         help_menu.addAction("About Gitualizer", self._about)
+
+    def _graph_spacing_control(
+        self,
+        menu: QMenu,
+        label: str,
+        *,
+        value: int,
+        minimum: int,
+        maximum: int,
+        step: int,
+        changed: Callable[[int], None],
+    ) -> QSpinBox:
+        container = QWidget(menu)
+        layout = QHBoxLayout(container)
+        layout.setContentsMargins(10, 4, 10, 4)
+        layout.addWidget(QLabel(label))
+        spin = QSpinBox(container)
+        spin.setRange(minimum, maximum)
+        spin.setSingleStep(step)
+        spin.setSuffix(" px")
+        spin.setValue(value)
+        spin.valueChanged.connect(changed)
+        layout.addWidget(spin)
+        action = QWidgetAction(menu)
+        action.setDefaultWidget(container)
+        menu.addAction(action)
+        return spin
 
     def _table(self, headers: list[str]):
         from PySide6.QtWidgets import QTableWidget
@@ -855,7 +894,8 @@ class MainWindow(QMainWindow):
         self._workspace_mode()
 
     def _reset_graph_visualization(self) -> None:
-        self.graph.set_visualization(row_spacing=52, lane_spacing=72)
+        self.lane_width_spin.setValue(72)
+        self.row_height_spin.setValue(52)
 
     def _change_ui_scale(self, delta: float) -> None:
         self._set_ui_scale(self.ui_scale + delta)
