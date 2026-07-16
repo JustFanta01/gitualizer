@@ -1,5 +1,7 @@
 # Gitualizer
 
+<img width="1366" height="732" alt="image" src="https://github.com/user-attachments/assets/297d7ef5-84ed-4392-87db-19c47575d30e" />
+
 Gitualizer is a desktop Git client built around drag and drop.
 
 Instead of starting with a Git command, you start with the graph:
