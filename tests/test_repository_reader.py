@@ -120,3 +120,17 @@ def test_recent_unreferenced_commits_are_loaded_from_reflog(tmp_path: Path) -> N
 
     assert lost in state.commits
     assert all(ref.target != lost for ref in state.references)
+
+
+def test_reads_stashes(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path / "stashes")
+    write(repo, "file.txt", "committed\n")
+    commit(repo, "initial")
+    write(repo, "file.txt", "stashed\n")
+    git(repo, "stash", "push", "-m", "work in progress")
+
+    state = RepositoryReader().read(repo)
+
+    assert len(state.stashes) == 1
+    assert state.stashes[0].ref == "stash@{0}"
+    assert "work in progress" in state.stashes[0].subject

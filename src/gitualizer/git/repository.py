@@ -13,6 +13,7 @@ from gitualizer.model.repository_state import (
     Reference,
     Remote,
     RepositoryState,
+    Stash,
 )
 
 
@@ -31,6 +32,7 @@ class RepositoryReader:
         references = self._read_references(root)
         commits, commits_truncated = self._read_commits(root, commit_limit)
         remotes = self._read_remotes(root)
+        stashes = self._read_stashes(root)
         changes = self._read_changes(root)
         operation = self._read_operation_state(git_dir)
         return RepositoryState(
@@ -40,6 +42,7 @@ class RepositoryReader:
             commits=commits,
             references=references,
             remotes=remotes,
+            stashes=stashes,
             changes=changes,
             operation=operation,
             commit_limit=commit_limit,
@@ -164,6 +167,20 @@ class RepositoryReader:
                 current = Remote(name=name, fetch_url=current.fetch_url, push_url=url)
             remotes[name] = current
         return [remotes[name] for name in sorted(remotes)]
+
+    def _read_stashes(self, root: Path) -> list[Stash]:
+        fmt = "%gd%x1f%H%x1f%gs%x1e"
+        result = self.runner.run(["stash", "list", f"--format={fmt}"], cwd=root, check=False)
+        if result.returncode != 0:
+            return []
+        stashes: list[Stash] = []
+        for record in result.stdout.split("\x1e"):
+            if not record.strip():
+                continue
+            ref, oid, subject = (record.strip("\n").split("\x1f") + ["", "", ""])[:3]
+            if ref and oid:
+                stashes.append(Stash(ref=ref, oid=oid, subject=subject))
+        return stashes
 
     def _read_changes(self, root: Path) -> list[FileChange]:
         result = self.runner.run(["status", "--porcelain=v1", "-z", "--untracked-files=all"], cwd=root)

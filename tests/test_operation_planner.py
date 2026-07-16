@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from gitualizer.model.repository_state import Commit, FileChange, HeadState, Reference, RepositoryState
+from gitualizer.model.repository_state import Commit, FileChange, HeadState, Reference, RepositoryState, Stash
 from gitualizer.operations.planner import OperationPlanner
 
 
@@ -354,3 +354,41 @@ def test_forget_unreachable_commits_expires_repository_wide_reflogs() -> None:
     repo_state.commits[reachable.oid] = reachable
     with pytest.raises(ValueError):
         OperationPlanner().forget_unreachable_commits(repo_state, [reachable])
+
+
+def test_stash_can_be_applied_to_branch_or_dropped() -> None:
+    repo_state = state()
+    stash = Stash(ref="stash@{0}", oid="d" * 40, subject="On main: saved work")
+    repo_state.stashes.append(stash)
+    feature = repo_state.local_branches[1]
+
+    apply_plan = OperationPlanner().apply_stash_to_branch(repo_state, stash, feature)
+    working_plan = OperationPlanner().apply_stash_to_working_tree(repo_state, stash)
+    drop_plan = OperationPlanner().drop_stash(repo_state, stash)
+
+    assert apply_plan.steps[0].args == ["git", "switch", "feature"]
+    assert apply_plan.steps[1].args == ["git", "stash", "apply", "stash@{0}"]
+    assert working_plan.steps[0].args == ["git", "stash", "apply", "stash@{0}"]
+    assert drop_plan.steps[0].args == ["git", "stash", "drop", "stash@{0}"]
+    assert drop_plan.destructive is True
+
+
+def test_selected_working_tree_paths_can_create_a_stash() -> None:
+    changes = [
+        FileChange(path="edited.txt", area="working_tree", code="M"),
+        FileChange(path="new file.txt", area="untracked", code="??"),
+    ]
+
+    plan = OperationPlanner().stash_paths(state(), changes, "Save selected work")
+
+    assert plan.steps[0].args == [
+        "git",
+        "stash",
+        "push",
+        "--include-untracked",
+        "-m",
+        "Save selected work",
+        "--",
+        "edited.txt",
+        "new file.txt",
+    ]

@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 from typing import Optional
 
-from gitualizer.model.repository_state import Commit, FileChange, Reference, RepositoryState
+from gitualizer.model.repository_state import Commit, FileChange, Reference, RepositoryState, Stash
 from gitualizer.operations.command_plan import CommandPlan, CommandStep
 
 
@@ -17,11 +17,77 @@ def state_fingerprint(state: RepositoryState) -> str:
         parts.append(f"ref:{ref.full_name}:{ref.target}")
     for change in sorted(state.changes, key=lambda item: (item.area, item.path, item.code)):
         parts.append(f"change:{change.area}:{change.code}:{change.path}:{change.original_path or ''}")
+    for stash in state.stashes:
+        parts.append(f"stash:{stash.ref}:{stash.oid}")
     digest = hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
     return digest
 
 
 class OperationPlanner:
+    def stash_paths(self, state: RepositoryState, changes: list[FileChange], message: str) -> CommandPlan:
+        if any(change.area == "conflict" for change in changes):
+            raise ValueError("Resolve conflicts before creating a stash.")
+        message = message.strip()
+        if not message:
+            raise ValueError("Enter a name for the stash.")
+        paths = _paths_for_changes(changes)
+        if not paths:
+            raise ValueError("Drag one or more working-tree files onto the stash panel.")
+        args = ["git", "stash", "push"]
+        if any(change.area == "untracked" for change in changes):
+            args.append("--include-untracked")
+        args.extend(["-m", message, "--", *paths])
+        return CommandPlan(
+            title=f"Stash {len(paths)} selected path(s)",
+            explanation="Create a new stash containing the selected working-tree paths.",
+            steps=[CommandStep(args, "Save the selected changes and restore those paths in the working tree.")],
+            expected_effects=["A new stash entry is created.", "Selected changes are removed from the working tree."],
+            preview_steps=["Collect the selected paths.", "Include untracked files when selected.", "Create one named stash entry."],
+            warnings=["Ignored files are not included."],
+            state_fingerprint=state_fingerprint(state),
+        )
+
+    def apply_stash_to_branch(self, state: RepositoryState, stash: Stash, branch: Reference) -> CommandPlan:
+        if branch.kind != "local_branch":
+            raise ValueError("Drop a stash onto a local branch.")
+        steps: list[CommandStep] = []
+        if state.head.branch != branch.name:
+            steps.append(CommandStep(["git", "switch", branch.name], f"Switch to `{branch.name}`."))
+        steps.append(CommandStep(["git", "stash", "apply", stash.ref], f"Apply `{stash.ref}` without removing it."))
+        return CommandPlan(
+            title=f"Apply {stash.ref} to {branch.name}",
+            explanation=f"Apply the stashed changes to `{branch.name}` and keep the stash for reuse.",
+            steps=steps,
+            expected_effects=[f"Stashed changes are applied to `{branch.name}`.", f"`{stash.ref}` remains in the stash list."],
+            preview_steps=[f"Switch to `{branch.name}` if needed.", f"Apply `{stash.ref}` to the working tree and index."],
+            warnings=["Applying a stash may stop with conflicts."],
+            state_fingerprint=state_fingerprint(state),
+        )
+
+    def apply_stash_to_working_tree(self, state: RepositoryState, stash: Stash) -> CommandPlan:
+        target = state.head.branch or "the current detached HEAD"
+        return CommandPlan(
+            title=f"Apply {stash.ref} to working tree",
+            explanation=f"Apply `{stash.ref}` to the working tree on {target} and keep the stash for reuse.",
+            steps=[CommandStep(["git", "stash", "apply", stash.ref], f"Apply `{stash.ref}`.")],
+            expected_effects=["Stashed changes are restored in the current working tree.", f"`{stash.ref}` remains in the stash list."],
+            preview_steps=[f"Apply `{stash.ref}` without switching branches.", "Keep the stash entry."],
+            warnings=["Applying a stash may stop with conflicts."],
+            state_fingerprint=state_fingerprint(state),
+        )
+
+    def drop_stash(self, state: RepositoryState, stash: Stash) -> CommandPlan:
+        return CommandPlan(
+            title=f"Drop {stash.ref}",
+            explanation=f"Delete `{stash.ref}` from the repository without applying its changes.",
+            steps=[CommandStep(["git", "stash", "drop", stash.ref], f"Delete `{stash.ref}`.")],
+            expected_effects=[f"`{stash.ref}` is removed from the stash list.", "The working tree and current branch are unchanged."],
+            preview_steps=[f"Delete the stash entry `{stash.ref}`.", "Do not apply its files."],
+            warnings=["The stash may become unrecoverable after Git garbage collection."],
+            destructive=True,
+            state_fingerprint=state_fingerprint(state),
+        )
+
     def switch_branch(self, state: RepositoryState, branch: str) -> CommandPlan:
         branch = branch.strip()
         if not branch:

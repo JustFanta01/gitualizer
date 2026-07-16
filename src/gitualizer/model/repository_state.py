@@ -39,6 +39,13 @@ class Remote:
 
 
 @dataclass(frozen=True)
+class Stash:
+    ref: str
+    oid: str
+    subject: str
+
+
+@dataclass(frozen=True)
 class FileChange:
     path: str
     area: ChangeArea
@@ -87,6 +94,7 @@ class RepositoryState:
     commits: dict[str, Commit] = field(default_factory=dict)
     references: list[Reference] = field(default_factory=list)
     remotes: list[Remote] = field(default_factory=list)
+    stashes: list[Stash] = field(default_factory=list)
     changes: list[FileChange] = field(default_factory=list)
     operation: OperationState = field(default_factory=OperationState)
     commit_limit: int = 300
