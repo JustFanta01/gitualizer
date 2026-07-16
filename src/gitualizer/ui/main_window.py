@@ -2,15 +2,12 @@ from __future__ import annotations
 
 import html
 from pathlib import Path
-import shlex
-import time
 from typing import Callable, Optional
 
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QAction, QFont
 from PySide6.QtWidgets import (
     QApplication,
-    QCheckBox,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
@@ -39,7 +36,7 @@ from PySide6.QtWidgets import (
 )
 
 from gitualizer.git.repository import RepositoryReader
-from gitualizer.git.runner import AUTH_SESSION_SECONDS, CommandEvent, GitError, remote_auth_environment
+from gitualizer.git.runner import GitError
 from gitualizer.model.repository_state import Commit, FileChange, Reference, RepositoryState, Stash
 from gitualizer.operations.command_plan import CommandPlan, ExecutionResult
 from gitualizer.operations.executor import CommandExecutor
@@ -61,9 +58,6 @@ class MainWindow(QMainWindow):
         self.refresh_in_progress = False
         self.commit_limit = 300
         self.fetch_in_progress = False
-        self.auth_state = "not_checked"
-        self.last_authorized_at: Optional[float] = None
-        self.last_interactive_auth_attempt: Optional[float] = None
         self.ui_scale = 1.0
         self._base_application_font = QApplication.font()
         self.setWindowTitle("Gitualizer")
@@ -106,21 +100,6 @@ class MainWindow(QMainWindow):
         self.command_panel.setOpenExternalLinks(False)
         self.command_panel.setMinimumHeight(115)
         self.command_panel.setHtml(_empty_preview_html())
-        self.command_history_events: list[CommandEvent] = []
-        self.command_history = QTextBrowser()
-        self.command_history.setReadOnly(True)
-        self.command_history.setMinimumHeight(115)
-        self.command_history.setPlaceholderText("Executed commands will appear here in real time.")
-        self.command_history.setObjectName("commandHistory")
-        self.show_command_stdout = QCheckBox("Show stdout and execution details")
-        self.show_command_stdout.setChecked(False)
-        self.show_command_stdout.toggled.connect(self._render_command_history)
-        self.command_history_container = QWidget()
-        history_layout = QVBoxLayout(self.command_history_container)
-        history_layout.setContentsMargins(0, 0, 0, 0)
-        history_layout.setSpacing(4)
-        history_layout.addWidget(self.show_command_stdout)
-        history_layout.addWidget(self.command_history, 1)
 
         self.working_panel = self._panel("Working Tree and Index", self.file_status)
 
@@ -149,15 +128,7 @@ class MainWindow(QMainWindow):
         self.right_panel.setMinimumWidth(320)
         self.main_splitter.setSizes([220, 700, 360])
 
-        self.command_splitter = QSplitter(Qt.Orientation.Horizontal)
-        self.command_splitter.addWidget(self.command_panel)
-        self.command_splitter.addWidget(self.command_history_container)
-        self.command_splitter.setChildrenCollapsible(False)
-        self.command_splitter.setSizes([520, 520])
-        self.command_panel_group = self._panel(
-            "Operation / Preview / Commands  |  Complete Command History",
-            self.command_splitter,
-        )
+        self.command_panel_group = self._panel("Operation / Preview / Commands", self.command_panel)
         self.command_panel_group.setCheckable(True)
         self.command_panel_group.setChecked(True)
         self.command_panel_group.setToolTip("Uncheck to collapse the command preview and give more space to repository panels.")
@@ -171,23 +142,11 @@ class MainWindow(QMainWindow):
         root_layout.addWidget(self.main_splitter, 1)
         root_layout.addWidget(self.command_panel_group)
         self.setCentralWidget(root)
-        self.auth_status_button = QPushButton("Auth: not checked")
-        self.auth_status_button.setObjectName("authStatusButton")
-        self.auth_status_button.setProperty("authState", "not_checked")
-        self.auth_status_button.setToolTip("Click to learn how remote authentication works.")
-        self.statusBar().addPermanentWidget(self.auth_status_button)
-        self.auth_elapsed_timer = QTimer(self)
-        self.auth_elapsed_timer.setInterval(1000)
-        self.auth_elapsed_timer.timeout.connect(self._update_auth_status_label)
-        self.auth_elapsed_timer.start()
-        self.reader.runner.set_observer(self._append_command_event)
-        self.executor.runner.set_observer(self._append_command_event)
         self._build_menus()
 
         self.open_button.clicked.connect(self._browse)
         self.refresh_button.clicked.connect(self.refresh)
         self.fetch_button.clicked.connect(self._interactive_fetch)
-        self.auth_status_button.clicked.connect(self._show_auth_explanation)
         self.path_edit.returnPressed.connect(self.refresh)
         self.graph.referenceDropped.connect(self._handle_reference_drop)
         self.graph.referenceDroppedOnCommit.connect(self._handle_reference_drop_on_commit)
@@ -348,55 +307,8 @@ class MainWindow(QMainWindow):
         return group
 
     def _set_command_panel_expanded(self, expanded: bool) -> None:
-        self.command_splitter.setVisible(expanded)
+        self.command_panel.setVisible(expanded)
         self.command_panel_group.updateGeometry()
-
-    def _append_command_event(self, event: CommandEvent) -> None:
-        if event.phase == "finished":
-            for index in range(len(self.command_history_events) - 1, -1, -1):
-                pending = self.command_history_events[index]
-                if pending.phase == "started" and pending.command == event.command and pending.cwd == event.cwd:
-                    self.command_history_events.pop(index)
-                    break
-        self.command_history_events.append(event)
-        self._render_command_history()
-        if event.phase == "started" and event.interactive:
-            QApplication.processEvents()
-
-    def _render_command_history(self) -> None:
-        show_details = self.show_command_stdout.isChecked()
-        entries: list[str] = []
-        for event in self.command_history_events:
-            command = html.escape(shlex.join(event.command))
-            timestamp = html.escape(event.timestamp)
-            header = (
-                "<div style='margin:0 0 3px 0;'>"
-                f"<span style='color:#667085;'>[{timestamp}]</span> "
-                f"<span style='color:#0969da; font-weight:800;'>$ {command}</span></div>"
-            )
-            details = ""
-            if show_details:
-                location = html.escape(str(event.cwd) if event.cwd is not None else "<default cwd>")
-                mode = "interactive terminal/auth" if event.interactive else "non-interactive"
-                outcome = "running" if event.phase == "started" else f"exit {event.returncode}"
-                details += (
-                    "<div style='color:#8c959f; margin-left:12px;'>"
-                    f"{html.escape(outcome)} · {html.escape(mode)} · cwd: {location}</div>"
-                )
-                if event.interactive and event.phase == "finished":
-                    details += (
-                        "<div style='color:#8c959f; margin-left:12px;'>"
-                        "stdin/stdout/stderr inherited by terminal; credentials are not captured</div>"
-                    )
-                elif event.stdout:
-                    stdout = html.escape(event.stdout.replace("\0", "\\0"))
-                    details += f"<pre style='color:#6e7781; margin:3px 0 3px 12px;'>{stdout}</pre>"
-            if event.stderr:
-                stderr = html.escape(event.stderr.replace("\0", "\\0"))
-                details += f"<pre style='color:#cf222e; margin:3px 0 3px 12px;'>{stderr}</pre>"
-            entries.append(f"<div style='margin-bottom:9px;'>{header}{details}</div>")
-        self.command_history.setHtml("".join(entries))
-        self.command_history.verticalScrollBar().setValue(self.command_history.verticalScrollBar().maximum())
 
     def _browse(self) -> None:
         selected = QFileDialog.getExistingDirectory(self, "Open Git Repository", self.path_edit.text())
@@ -418,68 +330,22 @@ class MainWindow(QMainWindow):
         if self.auto_fetch_enabled:
             self._interactive_fetch()
 
-    def _show_terminal_alert(self, action: str) -> QMessageBox:
-        terminal_alert = QMessageBox(self)
-        terminal_alert.setIcon(QMessageBox.Icon.Information)
-        terminal_alert.setWindowTitle("Action Required in Terminal")
-        terminal_alert.setText(f"Git may require input in the terminal while {action}.")
-        terminal_alert.setInformativeText(
-            "Check the terminal that launched Gitualizer and complete the Git/SSH authentication prompt there. "
-            "Your external SSH agent or Git credential manager may remember the authorization temporarily so "
-            "background fetches can continue. Gitualizer never receives or stores the password or token."
-        )
-        terminal_alert.setStandardButtons(QMessageBox.StandardButton.NoButton)
-        terminal_alert.show()
-        QApplication.processEvents()
-        return terminal_alert
-
-    def _set_auth_status(self, state: str) -> None:
-        self.auth_state = state
-        if state == "authorized":
-            self.last_authorized_at = time.monotonic()
-        elif state == "not_checked":
-            self.last_authorized_at = None
-        self.auth_status_button.setProperty("authState", state)
-        self.auth_status_button.style().unpolish(self.auth_status_button)
-        self.auth_status_button.style().polish(self.auth_status_button)
-        self._update_auth_status_label()
-
-    def _update_auth_status_label(self) -> None:
-        labels = {
-            "not_checked": "Auth: not checked",
-            "authorized": "Auth: authorized",
-            "required": "Auth: required",
-            "unavailable": "Auth: unavailable",
-        }
-        text = labels[self.auth_state]
-        if self.last_authorized_at is not None:
-            elapsed = max(0, int(time.monotonic() - self.last_authorized_at))
-            minutes, seconds = divmod(elapsed, 60)
-            text += f" · last authorized {minutes:02d}:{seconds:02d} ago"
-        self.auth_status_button.setText(text)
-
-    def _show_auth_explanation(self) -> None:
-        QMessageBox.information(
-            self,
-            "Remote Authentication",
-            "Gitualizer delegates authentication to Git/SSH in the terminal. It never reads, stores, or replays "
-            "your private-key password, HTTPS password, or token.\n\n"
-            "After an interactive command, an external SSH agent, desktop keyring, or Git credential manager may "
-            "remember the authorization temporarily. Gitualizer also asks Git and SSH to keep only their authenticated "
-            "session alive for five minutes. Background fetch can then run without prompting. Gitualizer never receives "
-            "the credential itself.\n\n"
-            "Authorized means the latest remote command succeeded. Required means Git reported an authentication "
-            "problem. Unavailable means the remote command failed for an unknown reason, such as network access.",
-        )
-
     def _interactive_fetch(self) -> None:
         if self.state is None or self.fetch_in_progress or not self.state.remotes:
             return
         self.fetch_in_progress = True
-        self.last_interactive_auth_attempt = time.monotonic()
         repository_path = self.state.path
-        terminal_alert = self._show_terminal_alert("fetching remotes")
+        terminal_alert = QMessageBox(self)
+        terminal_alert.setIcon(QMessageBox.Icon.Information)
+        terminal_alert.setWindowTitle("Action Required in Terminal")
+        terminal_alert.setText("Git is waiting for input in the terminal.")
+        terminal_alert.setInformativeText(
+            "Check the terminal that launched Gitualizer and complete the Git/SSH authentication prompt there."
+        )
+        terminal_alert.setStandardButtons(QMessageBox.StandardButton.NoButton)
+        terminal_alert.show()
         self.statusBar().showMessage("Fetching remotes; complete any authentication prompt from Git/SSH...")
+        QApplication.processEvents()
         try:
             # Do not provide an askpass program, redirect standard input, or
             # inspect the environment. Git/SSH and the user's credential
@@ -487,14 +353,11 @@ class MainWindow(QMainWindow):
             result = self.reader.runner.run_interactive(
                 ["fetch", "--all", "--prune"],
                 cwd=repository_path,
-                env=remote_auth_environment(interactive=True),
             )
             if result.returncode == 0:
-                self._set_auth_status("authorized")
                 self.statusBar().showMessage("Remote-tracking branches updated.", 4000)
                 self.refresh(show_errors=False)
             else:
-                self._set_auth_status("required")
                 self.statusBar().showMessage(
                     "Fetch was not completed. Authenticate and use File > Fetch Remotes to retry.",
                     10000,
@@ -518,25 +381,17 @@ class MainWindow(QMainWindow):
                     "GIT_TERMINAL_PROMPT": "0",
                     "GIT_ASKPASS": "echo",
                     "SSH_ASKPASS": "echo",
-                    **remote_auth_environment(interactive=False),
+                    "GIT_SSH_COMMAND": "ssh -o BatchMode=yes",
                 },
                 timeout=45,
             )
             if result.returncode == 0:
-                self._set_auth_status("authorized")
                 self.statusBar().showMessage("Remote-tracking branches updated.", 4000)
                 self.refresh(show_errors=False)
             else:
-                auth_failed = _looks_like_auth_failure(result.stderr)
-                self._set_auth_status("required" if auth_failed else "unavailable")
                 detail = result.stderr.strip().splitlines()
                 message = detail[-1] if detail else "Git fetch failed."
                 self.statusBar().showMessage(f"Auto-fetch failed: {message}", 10000)
-                last_attempt = self.last_interactive_auth_attempt
-                if auth_failed and (
-                    last_attempt is None or time.monotonic() - last_attempt >= AUTH_SESSION_SECONDS
-                ):
-                    QTimer.singleShot(0, self._interactive_fetch)
         finally:
             self.fetch_in_progress = False
             # Count the next interval from the end of this fetch, including
@@ -579,7 +434,6 @@ class MainWindow(QMainWindow):
         self._set_enabled(True)
         self.refresh_in_progress = False
         if self.state.path != previous_path:
-            self._set_auth_status("not_checked")
             # Authenticate through Git/SSH once when a repository is opened.
             # Later timer fetches are non-interactive and can never prompt.
             QTimer.singleShot(0, self._initial_fetch)
@@ -601,7 +455,6 @@ class MainWindow(QMainWindow):
 
     def _clear_repository_state(self) -> None:
         self.state = None
-        self._set_auth_status("not_checked")
         self.graph.set_state(None)
         self.graph.set_preview_plan(None)
         self._set_changes([])
@@ -700,26 +553,7 @@ class MainWindow(QMainWindow):
             )
             self.refresh()
             return
-        needs_terminal_auth = self.executor.requires_terminal_auth(plan)
-        terminal_alert = self._show_terminal_alert("contacting the remote") if needs_terminal_auth else None
-        if needs_terminal_auth:
-            self._set_auth_status("authorized" if result.success else "unavailable")
-            self.statusBar().showMessage(
-                "Contacting remote; complete any authentication prompt from Git/SSH..."
-            )
-        try:
-            result = self.executor.execute(plan, current_state.path)
-        finally:
-            if terminal_alert is not None:
-                terminal_alert.hide()
-                terminal_alert.deleteLater()
-        if needs_terminal_auth:
-            self.statusBar().showMessage(
-                "Remote command completed."
-                if result.success
-                else "Remote command failed; check the command result.",
-                6000,
-            )
+        result = self.executor.execute(plan, current_state.path)
         self.command_panel.setHtml(_render_plan_html(plan, details_open=True) + _render_result_html(result))
         self.graph.set_preview_plan(None)
         self.refresh()
@@ -1544,20 +1378,6 @@ def _render_diff_html(diff: str) -> str:
     )
 
 
-def _looks_like_auth_failure(stderr: str) -> bool:
-    lowered = stderr.lower()
-    return any(
-        marker in lowered
-        for marker in (
-            "authentication failed",
-            "could not read password",
-            "permission denied",
-            "publickey",
-            "terminal prompts disabled",
-        )
-    )
-
-
 APP_STYLE = """
 QMainWindow, QWidget {
     background: #f6f8fa;
@@ -1609,13 +1429,6 @@ QLineEdit[invalid="true"] {
 QTextEdit, QTextBrowser {
     font-family: "JetBrains Mono", "DejaVu Sans Mono", monospace;
 }
-QTextBrowser#commandHistory {
-    background: #ffffff;
-    color: #57606a;
-    border-color: #d0d7de;
-    selection-background-color: #b6d7ff;
-    selection-color: #111111;
-}
 QPushButton {
     background: #1f6feb;
     color: #ffffff;
@@ -1650,22 +1463,6 @@ QPushButton:disabled {
 }
 QPushButton#refreshButton:disabled, QPushButton#fetchButton:disabled {
     background: #a9b6c5;
-}
-QPushButton#authStatusButton {
-    background: #6b7280;
-    padding: 3px 8px;
-}
-QPushButton#authStatusButton[authState="authorized"] {
-    background: #1a7f37;
-}
-QPushButton#authStatusButton[authState="required"] {
-    background: #cf222e;
-}
-QPushButton#authStatusButton[authState="unavailable"] {
-    background: #9a6700;
-}
-QPushButton#authStatusButton:hover {
-    border: 1px solid #ffffff;
 }
 QHeaderView::section {
     background: #eef2f6;
