@@ -5,9 +5,7 @@ from datetime import datetime
 from pathlib import Path
 import os
 import subprocess
-import sys
 import tempfile
-import threading
 from typing import Callable, Optional, Union
 
 
@@ -169,72 +167,28 @@ class GitRunner:
         env: Optional[dict[str, str]] = None,
         timeout: Optional[float] = None,
     ) -> GitResult:
-        """Run Git with inherited input and tee its output to the terminal.
+        """Run Git with the parent's terminal and environment.
 
-        Standard input remains inherited for Git/SSH authentication. Standard
-        output and error are forwarded live to the parent terminal while also
-        being retained for the command history.
+        Standard input and output are deliberately inherited. This lets Git,
+        SSH, and configured credential helpers perform authentication without
+        exposing credentials to Gitualizer.
         """
         command = [self.git_executable, *args]
         cwd_path = Path(cwd).resolve() if cwd is not None else None
-        run_kwargs = {
-            "cwd": cwd_path,
-            "shell": False,
-            "stdin": None,
-            "stdout": subprocess.PIPE,
-            "stderr": subprocess.PIPE,
-            "text": True,
-            "bufsize": 1,
-        }
+        run_kwargs = {"cwd": cwd_path, "shell": False, "timeout": timeout}
         if env:
             process_env = os.environ.copy()
             process_env.update(env)
             run_kwargs["env"] = process_env
         self._emit("started", command, cwd_path, interactive=True)
         try:
-            process = subprocess.Popen(command, **run_kwargs)
-            captured_stdout: list[str] = []
-            captured_stderr: list[str] = []
-
-            def forward(stream, destination, captured: list[str]) -> None:
-                if stream is None:
-                    return
-                for chunk in iter(lambda: stream.read(1), ""):
-                    captured.append(chunk)
-                    destination.write(chunk)
-                    destination.flush()
-
-            output_threads = [
-                threading.Thread(
-                    target=forward,
-                    args=(process.stdout, sys.stdout, captured_stdout),
-                    daemon=True,
-                ),
-                threading.Thread(
-                    target=forward,
-                    args=(process.stderr, sys.stderr, captured_stderr),
-                    daemon=True,
-                ),
-            ]
-            for thread in output_threads:
-                thread.start()
-            try:
-                returncode = process.wait(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait()
-                returncode = 124
-                timeout_message = f"Command timed out after {timeout} seconds."
-                captured_stderr.append(timeout_message)
-                sys.stderr.write(timeout_message + "\n")
-                sys.stderr.flush()
-            for thread in output_threads:
-                thread.join()
+            completed = subprocess.run(command, **run_kwargs)
+        except subprocess.TimeoutExpired:
             completed = subprocess.CompletedProcess(
                 command,
-                returncode,
-                "".join(captured_stdout),
-                "".join(captured_stderr),
+                124,
+                "",
+                f"Command timed out after {timeout} seconds.",
             )
         except OSError as exc:
             failed = GitResult(command, cwd_path, "", str(exc), 126)
