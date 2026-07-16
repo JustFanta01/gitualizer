@@ -21,7 +21,7 @@ def test_interactive_run_inherits_authentication_channels(monkeypatch, tmp_path:
 
     assert result.returncode == 0
     assert invocation["command"] == ["git", "fetch", "--all"]
-    assert invocation["kwargs"] == {"cwd": tmp_path.resolve(), "shell": False}
+    assert invocation["kwargs"] == {"cwd": tmp_path.resolve(), "shell": False, "timeout": None}
     assert [event.phase for event in events] == ["started", "finished"]
     assert all(event.interactive for event in events)
     assert events[-1].returncode == 0
@@ -35,3 +35,15 @@ def test_remote_auth_environment_uses_five_minute_external_sessions() -> None:
     assert f"ControlPersist={AUTH_SESSION_SECONDS}" in interactive["GIT_SSH_COMMAND"]
     assert "BatchMode=yes" not in interactive["GIT_SSH_COMMAND"]
     assert "BatchMode=yes" in background["GIT_SSH_COMMAND"]
+
+
+def test_interactive_run_returns_timeout_without_blocking_forever(monkeypatch, tmp_path: Path) -> None:
+    def timeout(*args, **kwargs):
+        raise subprocess.TimeoutExpired(args[0], kwargs["timeout"])
+
+    monkeypatch.setattr(subprocess, "run", timeout)
+
+    result = GitRunner().run_interactive(["fetch"], cwd=tmp_path, timeout=2)
+
+    assert result.returncode == 124
+    assert "timed out" in result.stderr

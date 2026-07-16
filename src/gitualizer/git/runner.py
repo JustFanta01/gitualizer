@@ -21,15 +21,21 @@ def remote_auth_environment(*, interactive: bool) -> dict[str, str]:
         "-o", "ControlMaster=auto",
         "-o", f"ControlPersist={AUTH_SESSION_SECONDS}",
         "-o", f"ControlPath={control_path}",
+        "-o", "ConnectTimeout=10",
+        "-o", "ConnectionAttempts=1",
     ]
     if not interactive:
         ssh_options.extend(["-o", "BatchMode=yes"])
     return {
-        "GIT_CONFIG_COUNT": "2",
+        "GIT_CONFIG_COUNT": "4",
         "GIT_CONFIG_KEY_0": "credential.helper",
         "GIT_CONFIG_VALUE_0": "",
         "GIT_CONFIG_KEY_1": "credential.helper",
         "GIT_CONFIG_VALUE_1": f"cache --timeout={AUTH_SESSION_SECONDS}",
+        "GIT_CONFIG_KEY_2": "http.lowSpeedLimit",
+        "GIT_CONFIG_VALUE_2": "1",
+        "GIT_CONFIG_KEY_3": "http.lowSpeedTime",
+        "GIT_CONFIG_VALUE_3": "10",
         "GIT_SSH_COMMAND": " ".join(str(option) for option in ssh_options),
     }
 
@@ -159,6 +165,7 @@ class GitRunner:
         cwd: Optional[Union[Path, str]] = None,
         *,
         env: Optional[dict[str, str]] = None,
+        timeout: Optional[float] = None,
     ) -> GitResult:
         """Run Git with the parent's terminal and environment.
 
@@ -168,7 +175,7 @@ class GitRunner:
         """
         command = [self.git_executable, *args]
         cwd_path = Path(cwd).resolve() if cwd is not None else None
-        run_kwargs = {"cwd": cwd_path, "shell": False}
+        run_kwargs = {"cwd": cwd_path, "shell": False, "timeout": timeout}
         if env:
             process_env = os.environ.copy()
             process_env.update(env)
@@ -176,10 +183,23 @@ class GitRunner:
         self._emit("started", command, cwd_path, interactive=True)
         try:
             completed = subprocess.run(command, **run_kwargs)
+        except subprocess.TimeoutExpired:
+            completed = subprocess.CompletedProcess(
+                command,
+                124,
+                "",
+                f"Command timed out after {timeout} seconds.",
+            )
         except OSError as exc:
             failed = GitResult(command, cwd_path, "", str(exc), 126)
             self._emit("finished", command, cwd_path, interactive=True, result=failed)
             raise
-        result = GitResult(command, cwd_path, "", "", completed.returncode)
+        result = GitResult(
+            command,
+            cwd_path,
+            completed.stdout if isinstance(completed.stdout, str) else "",
+            completed.stderr if isinstance(completed.stderr, str) else "",
+            completed.returncode,
+        )
         self._emit("finished", command, cwd_path, interactive=True, result=result)
         return result
