@@ -184,6 +184,7 @@ class MainWindow(QMainWindow):
         open_action.triggered.connect(self._browse)
         file_menu.addAction(open_action)
         file_menu.addAction("Refresh", self.refresh)
+        file_menu.addAction("Fetch Remotes (Authenticate)...", self._interactive_fetch)
         file_menu.addSeparator()
         file_menu.addAction("Quit", QApplication.instance().quit)
 
@@ -319,6 +320,37 @@ class MainWindow(QMainWindow):
     def _set_auto_fetch(self, enabled: bool) -> None:
         self.auto_fetch_enabled = enabled
 
+    def _initial_fetch(self) -> None:
+        if self.auto_fetch_enabled:
+            self._interactive_fetch()
+
+    def _interactive_fetch(self) -> None:
+        if self.state is None or self.fetch_in_progress or not self.state.remotes:
+            return
+        self.fetch_in_progress = True
+        repository_path = self.state.path
+        self.statusBar().showMessage("Fetching remotes; complete any authentication prompt from Git/SSH...")
+        QApplication.processEvents()
+        try:
+            # Do not provide an askpass program, redirect standard input, or
+            # inspect the environment. Git/SSH and the user's credential
+            # helper own the complete authentication exchange.
+            result = self.reader.runner.run_interactive(
+                ["fetch", "--all", "--prune"],
+                cwd=repository_path,
+            )
+            if result.returncode == 0:
+                self.statusBar().showMessage("Remote-tracking branches updated.", 4000)
+                self.refresh(show_errors=False)
+            else:
+                self.statusBar().showMessage(
+                    "Fetch was not completed. Authenticate and use File > Fetch Remotes to retry.",
+                    10000,
+                )
+        finally:
+            self.fetch_in_progress = False
+            self.fetch_timer.start()
+
     def _auto_fetch(self) -> None:
         if not self.auto_fetch_enabled or self.state is None or self.fetch_in_progress or not self.state.remotes:
             return
@@ -337,14 +369,23 @@ class MainWindow(QMainWindow):
                 timeout=45,
             )
             if result.returncode == 0:
+                self.statusBar().showMessage("Remote-tracking branches updated.", 4000)
                 self.refresh(show_errors=False)
+            else:
+                detail = result.stderr.strip().splitlines()
+                message = detail[-1] if detail else "Git fetch failed."
+                self.statusBar().showMessage(f"Auto-fetch failed: {message}", 10000)
         finally:
             self.fetch_in_progress = False
+            # Count the next interval from the end of this fetch, including
+            # the immediate fetch performed when a repository is opened.
+            self.fetch_timer.start()
 
     def refresh(self, show_errors: bool = True) -> None:
         if self.refresh_in_progress:
             return
         self.refresh_in_progress = True
+        previous_path = self.state.path if self.state is not None else None
         requested_path = Path(self.path_edit.text()).expanduser()
         if not requested_path.exists() or not requested_path.is_dir():
             message = (
@@ -375,6 +416,10 @@ class MainWindow(QMainWindow):
         self._refresh_controls(self.state)
         self._set_enabled(True)
         self.refresh_in_progress = False
+        if self.state.path != previous_path:
+            # Authenticate through Git/SSH once when a repository is opened.
+            # Later timer fetches are non-interactive and can never prompt.
+            QTimer.singleShot(0, self._initial_fetch)
 
     def _show_path_error(self, message: str) -> None:
         self.path_edit.setProperty("invalid", True)

@@ -79,3 +79,19 @@ class GitRunner:
         if check and completed.returncode != 0:
             raise GitError(command, cwd_path, completed.returncode, completed.stdout, completed.stderr)
         return result
+
+    def run_interactive(
+        self,
+        args: list[str],
+        cwd: Optional[Union[Path, str]] = None,
+    ) -> GitResult:
+        """Run Git with the parent's terminal and environment.
+
+        Standard input and output are deliberately inherited. This lets Git,
+        SSH, and configured credential helpers perform authentication without
+        exposing credentials to Gitualizer.
+        """
+        command = [self.git_executable, *args]
+        cwd_path = Path(cwd).resolve() if cwd is not None else None
+        completed = subprocess.run(command, cwd=cwd_path, shell=False)
+        return GitResult(command, cwd_path, "", "", completed.returncode)
