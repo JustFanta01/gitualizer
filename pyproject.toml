@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "gitualizer"
 version = "0.1.0"
-description = "A visual read-only Git repository inspector."
+description = "Drag-and-drop Git repository tool for visually executing commands.."
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
