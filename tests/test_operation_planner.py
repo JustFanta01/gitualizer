@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -234,6 +235,7 @@ def test_bulk_drop_requires_and_removes_a_contiguous_sequence() -> None:
     older = Commit("c" * 40, "c" * 12, (base.oid,), "A", "a@example.invalid", "2024-01-02T00:00:00+00:00", "older")
     newer = Commit("d" * 40, "d" * 12, (older.oid,), "A", "a@example.invalid", "2024-01-03T00:00:00+00:00", "newer")
     repo_state.commits.update({newer.oid: newer, older.oid: older, base.oid: base})
+    repo_state.references[0] = replace(repo_state.references[0], target=newer.oid)
 
     plan = OperationPlanner().drop_commits_from_current_branch(repo_state, [newer, older])
 
@@ -279,6 +281,8 @@ def test_commit_trash_can_revert_or_drop_from_current_branch() -> None:
         "2024-01-01T00:00:00+00:00",
         "source",
     )
+    repo_state.commits[source.oid] = source
+    repo_state.references[0] = replace(repo_state.references[0], target=source.oid)
 
     revert = OperationPlanner().revert_commit_on_current_branch(repo_state, source)
     drop = OperationPlanner().drop_commit_from_current_branch(repo_state, source)
@@ -293,6 +297,8 @@ def test_graph_changing_plans_have_graph_previews() -> None:
     planner = OperationPlanner()
     target = Commit("c" * 40, "c" * 12, ("a" * 40,), "A", "a@example.invalid", "2024-01-01T00:00:00+00:00", "target")
     source = Commit("b" * 40, "b" * 12, ("a" * 40,), "A", "a@example.invalid", "2024-01-01T00:00:00+00:00", "source")
+    repo_state.commits.update({source.oid: source, target.oid: target})
+    repo_state.references[0] = replace(repo_state.references[0], target=source.oid)
     remote = Reference(
         name="origin/main",
         full_name="refs/remotes/origin/main",
@@ -331,3 +337,20 @@ def test_graph_changing_plans_have_graph_previews() -> None:
 
     assert all(plan.graph_preview for plan in graph_plans)
     assert planner.stage_paths(repo_state, [FileChange(path="edited.txt", area="working_tree", code="M")]).graph_preview == []
+
+
+def test_forget_unreachable_commits_expires_repository_wide_reflogs() -> None:
+    repo_state = state()
+    lost = Commit("d" * 40, "d" * 12, tuple(), "A", "a@example.invalid", "2024-01-01T00:00:00+00:00", "lost")
+    repo_state.commits[lost.oid] = lost
+
+    plan = OperationPlanner().forget_unreachable_commits(repo_state, [lost])
+
+    assert plan.steps[0].args == ["git", "reflog", "expire", "--expire-unreachable=now", "--all"]
+    assert plan.destructive is True
+    assert "REPOSITORY-WIDE" in plan.warnings[0]
+
+    reachable = Commit("a" * 40, "a" * 12, tuple(), "A", "a@example.invalid", "2024-01-01T00:00:00+00:00", "main")
+    repo_state.commits[reachable.oid] = reachable
+    with pytest.raises(ValueError):
+        OperationPlanner().forget_unreachable_commits(repo_state, [reachable])

@@ -670,6 +670,10 @@ class MainWindow(QMainWindow):
             plans.append(self.planner.drop_commit_from_current_branch(self.state, source))
         except ValueError:
             pass
+        try:
+            plans.append(self.planner.forget_unreachable_commits(self.state, [source]))
+        except ValueError:
+            pass
         if not plans:
             QMessageBox.information(
                 self,
@@ -702,12 +706,23 @@ class MainWindow(QMainWindow):
     def _handle_commits_drop_to_trash(self, sources: list[Commit]) -> None:
         if self.state is None:
             return
+        plans: list[CommandPlan] = []
         try:
-            plan = self.planner.drop_commits_from_current_branch(self.state, sources)
-        except ValueError as exc:
-            QMessageBox.information(self, "Operation Not Available", str(exc))
+            plans.append(self.planner.drop_commits_from_current_branch(self.state, sources))
+        except ValueError:
+            pass
+        try:
+            plans.append(self.planner.forget_unreachable_commits(self.state, sources))
+        except ValueError:
+            pass
+        if not plans:
+            QMessageBox.information(
+                self,
+                "Operation Not Available",
+                "The selection is neither a contiguous sequence on the current branch nor entirely unreachable.",
+            )
             return
-        self._preview_and_confirm(plan)
+        self._choose_preview_and_execute(f"{len(sources)} selected commits", "trash", plans)
 
     def _handle_reference_drop_to_trash(self, source: Reference) -> None:
         if self.state is None:

@@ -661,6 +661,8 @@ class OperationPlanner:
         current = _current_branch_ref(state)
         if current is None:
             raise ValueError("A local branch must be checked out to drop a commit.")
+        if source.oid not in _reachable_from(state, current.target):
+            raise ValueError(f"{source.short_oid} does not belong to the current branch `{current.name}`.")
         if len(source.parents) != 1:
             raise ValueError("Only single-parent commits can be dropped with this rebase plan.")
         parent = source.parents[0]
@@ -702,6 +704,9 @@ class OperationPlanner:
         ordered = _oldest_first(state, sources)
         if not ordered or any(len(commit.parents) != 1 for commit in ordered):
             raise ValueError("Select a sequence of single-parent commits.")
+        branch_history = _reachable_from(state, current.target)
+        if any(commit.oid not in branch_history for commit in ordered):
+            raise ValueError(f"The selection does not belong to the current branch `{current.name}`.")
         selected = {commit.oid for commit in ordered}
         for older, newer in zip(ordered, ordered[1:]):
             if older.oid not in newer.parents:
@@ -718,6 +723,50 @@ class OperationPlanner:
             preview_steps=["Keep the parent before the selection.", "Omit the selected sequence.", "Replay later descendants."],
             warnings=["This rewrites branch history and may require force-with-lease after a previous push."],
             history_rewrite=True,
+            destructive=True,
+            state_fingerprint=state_fingerprint(state),
+        )
+
+    def forget_unreachable_commits(self, state: RepositoryState, sources: list[Commit]) -> CommandPlan:
+        if not sources:
+            raise ValueError("Select one or more unreachable commits.")
+        reachable: set[str] = set()
+        for ref in state.references:
+            reachable.update(_reachable_from(state, ref.target))
+        if state.head.oid:
+            reachable.update(_reachable_from(state, state.head.oid))
+        if any(commit.oid in reachable for commit in sources):
+            raise ValueError("Only commits not reachable from a branch, tag, or HEAD can be forgotten.")
+        return CommandPlan(
+            title="Forget all unreachable commits from reflogs",
+            explanation=(
+                "Expire repository-wide reflog entries for commits that are no longer reachable. "
+                "The selected lost commits will disappear from Gitualizer and become eligible for Git garbage collection."
+            ),
+            steps=[
+                CommandStep(
+                    ["git", "reflog", "expire", "--expire-unreachable=now", "--all"],
+                    "Expire all unreachable entries from every reflog in this repository.",
+                )
+            ],
+            expected_effects=[
+                "All currently unreachable commits disappear from reflog-based history views.",
+                "Git may permanently remove their objects during a later automatic or manual garbage collection.",
+            ],
+            preview_steps=[
+                "Find reflog entries that are unreachable from current refs.",
+                "Expire those entries across the repository.",
+                "Leave every branch, tag, HEAD, index, and working-tree file unchanged.",
+            ],
+            graph_preview=[
+                "Before:  main o---o       x---x  lost reflog-only commits",
+                "After:   main o---o              lost sequence no longer shown",
+            ],
+            warnings=[
+                "REPOSITORY-WIDE: this affects every unreachable reflog entry, not only the selected commits.",
+                "You lose the normal reflog recovery path for abandoned resets, rebases, and deleted branches.",
+                "This cannot be reliably undone after Git garbage-collects the underlying objects.",
+            ],
             destructive=True,
             state_fingerprint=state_fingerprint(state),
         )
@@ -762,6 +811,20 @@ def _oldest_first(state: RepositoryState, commits: list[Commit]) -> list[Commit]
     selected = {commit.oid for commit in commits}
     # Repository commits are date-ordered newest first.
     return [commit for commit in reversed(list(state.commits.values())) if commit.oid in selected]
+
+
+def _reachable_from(state: RepositoryState, tip: str) -> set[str]:
+    reachable: set[str] = set()
+    pending = [tip]
+    while pending:
+        oid = pending.pop()
+        if oid in reachable:
+            continue
+        reachable.add(oid)
+        commit = state.commits.get(oid)
+        if commit is not None:
+            pending.extend(commit.parents)
+    return reachable
 
 
 def _paths_for_changes(changes: list[FileChange]) -> list[str]:
