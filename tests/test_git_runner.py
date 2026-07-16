@@ -33,5 +33,7 @@ def test_remote_auth_environment_uses_five_minute_external_sessions() -> None:
 
     assert interactive["GIT_CONFIG_VALUE_1"] == f"cache --timeout={AUTH_SESSION_SECONDS}"
     assert f"ControlPersist={AUTH_SESSION_SECONDS}" in interactive["GIT_SSH_COMMAND"]
+    assert "ConnectTimeout=10" in interactive["GIT_SSH_COMMAND"]
     assert "BatchMode=yes" not in interactive["GIT_SSH_COMMAND"]
     assert "BatchMode=yes" in background["GIT_SSH_COMMAND"]
+    assert background["GIT_CONFIG_VALUE_3"] == "10"

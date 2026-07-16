@@ -33,6 +33,7 @@ class CommitGraphWidget(QWidget):
     stashDroppedToTrash = Signal(str)
     referenceDroppedToTrash = Signal(object)
     commitContextRequested = Signal(object, object)
+    commitsContextRequested = Signal(object, object)
     referenceContextRequested = Signal(object, object)
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
@@ -237,13 +238,16 @@ class CommitGraphWidget(QWidget):
         painter.drawRoundedRect(rect, 7, 7)
         painter.setPen(color)
         painter.setFont(self._font(9, QFont.Weight.Bold))
+        ahead, behind = self._comparison_counts(ref)
+        badge_count = int(bool(ahead and ahead > 0)) + int(bool(behind and behind > 0))
+        badge_space = badge_count * 76
         name_prefix = "||| -> " if ref.kind == "remote_tracking" else "||| "
         name_text = painter.fontMetrics().elidedText(
             f"{name_prefix}{ref.name}",
             Qt.TextElideMode.ElideRight,
-            int(width - 68),
+            int(width - 18 - badge_space),
         )
-        painter.drawText(rect.adjusted(8, 4, -54, -17), Qt.AlignmentFlag.AlignVCenter, name_text)
+        painter.drawText(rect.adjusted(8, 4, -10 - badge_space, -17), Qt.AlignmentFlag.AlignVCenter, name_text)
         painter.setFont(self._font(8))
         painter.setPen(QColor("#52616f"))
         meta = ref.target[:12]
@@ -252,29 +256,31 @@ class CommitGraphWidget(QWidget):
         elif ref.kind == "remote_tracking" and "/" in ref.name:
             remote, branch = ref.name.split("/", 1)
             meta = f"{meta}  cache of {remote}:{branch}"
-        meta_text = painter.fontMetrics().elidedText(meta, Qt.TextElideMode.ElideRight, int(width - 18))
-        painter.drawText(rect.adjusted(8, 20, -10, -3), Qt.AlignmentFlag.AlignVCenter, meta_text)
-        ahead, behind = self._comparison_counts(ref)
-        if behind and behind > 0:
-            painter.setBrush(QColor("#2da44e"))
-            painter.setPen(QPen(QColor("#ffffff"), 1))
-            painter.drawEllipse(QPointF(x + width - 22, y + 18), 8, 8)
+        meta_text = painter.fontMetrics().elidedText(meta, Qt.TextElideMode.ElideRight, int(width - 18 - badge_space))
+        painter.drawText(rect.adjusted(8, 20, -10 - badge_space, -3), Qt.AlignmentFlag.AlignVCenter, meta_text)
+
+        badge_x = x + width - 8
+        painter.setFont(self._font(7, QFont.Weight.Bold))
+        for label, count, badge_color in (
+            ("behind", behind, QColor("#2da44e")),
+            ("ahead", ahead, QColor("#d1242f")),
+        ):
+            if not count or count <= 0:
+                continue
+            badge_x -= 72
+            badge = QRectF(badge_x, y + 9, 68, 20)
+            painter.setPen(QPen(badge_color, 1))
+            painter.setBrush(badge_color)
+            painter.drawRoundedRect(badge, 7, 7)
             painter.setPen(QColor("#ffffff"))
-            painter.setFont(self._font(7, QFont.Weight.Bold))
-            painter.drawText(QRectF(x + width - 30, y + 10, 16, 16), Qt.AlignmentFlag.AlignCenter, str(behind))
-        if include_remote_columns and ahead and ahead > 0:
-            painter.setBrush(QColor("#d1242f"))
-            painter.setPen(QPen(QColor("#ffffff"), 1))
-            painter.drawEllipse(QPointF(x + width - 44, y + 18), 8, 8)
-            painter.setPen(QColor("#ffffff"))
-            painter.drawText(QRectF(x + width - 52, y + 10, 16, 16), Qt.AlignmentFlag.AlignCenter, str(ahead))
+            painter.drawText(badge, Qt.AlignmentFlag.AlignCenter, f"{label}: {count}")
+            badge_x -= 4
 
     def _comparison_counts(self, ref: Reference) -> tuple[Optional[int], Optional[int]]:
         """Return local-ahead/remote-ahead counts for a branch card.
 
-        Git records upstream divergence on the local branch. Mirror those
-        values onto its remote-tracking card so the remote column explicitly
-        shows commits discovered by fetch that are missing locally.
+        Git records upstream divergence on the local branch. Invert those
+        values for its remote-tracking card so each card describes itself.
         """
         if ref.kind != "remote_tracking" or self._state is None:
             return ref.ahead, ref.behind
@@ -284,8 +290,8 @@ class CommitGraphWidget(QWidget):
         ahead_values = [local.ahead for local in tracking if local.ahead is not None]
         behind_values = [local.behind for local in tracking if local.behind is not None]
         return (
-            max(ahead_values) if ahead_values else ref.ahead,
-            max(behind_values) if behind_values else ref.behind,
+            max(behind_values) if behind_values else ref.ahead,
+            max(ahead_values) if ahead_values else ref.behind,
         )
 
     def _draw_empty(self, painter: QPainter, text: str) -> None:
@@ -670,6 +676,12 @@ class CommitGraphWidget(QWidget):
         commit = fallback or self._drag_commit
         return [commit] if commit is not None else []
 
+    def selected_commits(self, fallback: Optional[Commit] = None) -> list[Commit]:
+        """Return the visible multi-selection when it contains the clicked commit."""
+        if fallback is not None and fallback.oid not in self._selected_oids:
+            return [fallback]
+        return self._dragged_commits(fallback)
+
     def _commit_at(self, pos: QPoint) -> Optional[Commit]:
         for rect, commit in reversed(self._commit_hitboxes):
             if rect.contains(pos):
@@ -689,7 +701,11 @@ class CommitGraphWidget(QWidget):
             return
         commit = self._commit_at(event.pos())
         if commit is not None:
-            self.commitContextRequested.emit(commit, event.globalPos())
+            selected = self.selected_commits(commit)
+            if len(selected) > 1:
+                self.commitsContextRequested.emit(selected, event.globalPos())
+            else:
+                self.commitContextRequested.emit(commit, event.globalPos())
             event.accept()
             return
         super().contextMenuEvent(event)

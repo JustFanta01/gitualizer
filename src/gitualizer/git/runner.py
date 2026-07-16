@@ -21,15 +21,21 @@ def remote_auth_environment(*, interactive: bool) -> dict[str, str]:
         "-o", "ControlMaster=auto",
         "-o", f"ControlPersist={AUTH_SESSION_SECONDS}",
         "-o", f"ControlPath={control_path}",
+        "-o", "ConnectTimeout=10",
+        "-o", "ConnectionAttempts=1",
     ]
     if not interactive:
         ssh_options.extend(["-o", "BatchMode=yes"])
     return {
-        "GIT_CONFIG_COUNT": "2",
+        "GIT_CONFIG_COUNT": "4",
         "GIT_CONFIG_KEY_0": "credential.helper",
         "GIT_CONFIG_VALUE_0": "",
         "GIT_CONFIG_KEY_1": "credential.helper",
         "GIT_CONFIG_VALUE_1": f"cache --timeout={AUTH_SESSION_SECONDS}",
+        "GIT_CONFIG_KEY_2": "http.lowSpeedLimit",
+        "GIT_CONFIG_VALUE_2": "1",
+        "GIT_CONFIG_KEY_3": "http.lowSpeedTime",
+        "GIT_CONFIG_VALUE_3": "10",
         "GIT_SSH_COMMAND": " ".join(str(option) for option in ssh_options),
     }
 
@@ -100,8 +106,10 @@ class GitRunner:
                 interactive=interactive,
                 timestamp=datetime.now().astimezone().strftime("%H:%M:%S"),
                 returncode=result.returncode if result else None,
-                stdout=result.stdout if result else "",
-                stderr=result.stderr if result else "",
+                # History events are an execution audit trail, not a second
+                # command-output buffer. Results remain with their callers.
+                stdout="",
+                stderr="",
             )
         )
 
