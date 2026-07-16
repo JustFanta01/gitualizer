@@ -9,6 +9,7 @@ from PySide6.QtWidgets import QWidget
 
 from gitualizer.model.repository_state import Commit, Reference, RepositoryState
 from gitualizer.operations.command_plan import CommandPlan
+from gitualizer.ui.drag_mime import STAGE_MIME, STASH_MIME
 
 
 @dataclass(frozen=True)
@@ -28,6 +29,8 @@ class CommitGraphWidget(QWidget):
     commitsDroppedOnReference = Signal(object, object)
     commitsDroppedOnCommit = Signal(object, object)
     commitsDroppedToTrash = Signal(object)
+    stashDroppedOnBranch = Signal(str, object)
+    stashDroppedToTrash = Signal(str)
     referenceDroppedToTrash = Signal(object)
     commitContextRequested = Signal(object, object)
     referenceContextRequested = Signal(object, object)
@@ -49,6 +52,7 @@ class CommitGraphWidget(QWidget):
         self._hover_ref: Optional[Reference] = None
         self._hover_commit: Optional[Commit] = None
         self._external_stage_drag = False
+        self._external_stash_ref: Optional[str] = None
         self._mode = "commits"
         self._trash_rect = QRectF()
         self._viewport_x = 0
@@ -473,7 +477,7 @@ class CommitGraphWidget(QWidget):
         painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
 
     def _draw_trash(self, painter: QPainter) -> None:
-        if self._drag_commit is None and not self._is_deletable_drag_ref():
+        if self._drag_commit is None and not self._is_deletable_drag_ref() and self._external_stash_ref is None:
             self._trash_rect = QRectF()
             return
         self._trash_rect = self._trash_drop_rect()
@@ -493,7 +497,7 @@ class CommitGraphWidget(QWidget):
         return QRectF(max(margin, x), y, size, size)
 
     def _is_possible_ref_drop(self, ref: Reference) -> bool:
-        if self._external_stage_drag:
+        if self._external_stage_drag or self._external_stash_ref is not None:
             return ref.kind == "local_branch"
         if self._drag_ref is None:
             if self._drag_commit is not None:
@@ -674,25 +678,49 @@ class CommitGraphWidget(QWidget):
         return None
 
     def dragEnterEvent(self, event) -> None:  # noqa: N802
-        if event.mimeData().hasFormat("application/x-gitualizer-stage"):
+        if event.mimeData().hasFormat(STAGE_MIME):
             self._set_external_stage_drag(True, event.position().toPoint())
+            event.acceptProposedAction()
+            return
+        if event.mimeData().hasFormat(STASH_MIME):
+            self._set_external_stash_drag(bytes(event.mimeData().data(STASH_MIME)).decode("utf-8", errors="ignore"), event.position().toPoint())
             event.acceptProposedAction()
             return
         event.ignore()
 
     def dragMoveEvent(self, event) -> None:  # noqa: N802
-        if event.mimeData().hasFormat("application/x-gitualizer-stage"):
+        if event.mimeData().hasFormat(STAGE_MIME):
             self._set_external_stage_drag(True, event.position().toPoint())
+            event.acceptProposedAction()
+            return
+        if event.mimeData().hasFormat(STASH_MIME):
+            self._set_external_stash_drag(bytes(event.mimeData().data(STASH_MIME)).decode("utf-8", errors="ignore"), event.position().toPoint())
             event.acceptProposedAction()
             return
         event.ignore()
 
     def dragLeaveEvent(self, event) -> None:  # noqa: N802
         self._set_external_stage_drag(False)
+        self._set_external_stash_drag(None)
         super().dragLeaveEvent(event)
 
     def dropEvent(self, event) -> None:  # noqa: N802
-        if not event.mimeData().hasFormat("application/x-gitualizer-stage"):
+        if event.mimeData().hasFormat(STASH_MIME):
+            stash_ref = bytes(event.mimeData().data(STASH_MIME)).decode("utf-8", errors="ignore")
+            release_pos = event.position().toPoint()
+            target = self._reference_at(release_pos)
+            self._set_external_stash_drag(None)
+            if stash_ref and self._trash_drop_rect().contains(release_pos):
+                self.stashDroppedToTrash.emit(stash_ref)
+                event.acceptProposedAction()
+                return
+            if stash_ref and target is not None and target.kind == "local_branch":
+                self.stashDroppedOnBranch.emit(stash_ref, target)
+                event.acceptProposedAction()
+                return
+            event.ignore()
+            return
+        if not event.mimeData().hasFormat(STAGE_MIME):
             self._set_external_stage_drag(False)
             event.ignore()
             return
@@ -703,3 +731,8 @@ class CommitGraphWidget(QWidget):
             return
         self.stageDroppedOnBranch.emit(target)
         event.acceptProposedAction()
+
+    def _set_external_stash_drag(self, stash_ref: Optional[str], pos: Optional[QPoint] = None) -> None:
+        self._external_stash_ref = stash_ref or None
+        self._hover_ref = self._reference_at(pos) if self._external_stash_ref and pos is not None else None
+        self.update()

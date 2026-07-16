@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QSplitter,
     QTableWidgetItem,
+    QTabWidget,
     QTextBrowser,
     QTextEdit,
     QVBoxLayout,
@@ -36,12 +37,13 @@ from PySide6.QtWidgets import (
 
 from gitualizer.git.repository import RepositoryReader
 from gitualizer.git.runner import GitError
-from gitualizer.model.repository_state import Commit, FileChange, Reference, RepositoryState
+from gitualizer.model.repository_state import Commit, FileChange, Reference, RepositoryState, Stash
 from gitualizer.operations.command_plan import CommandPlan, ExecutionResult
 from gitualizer.operations.executor import CommandExecutor
 from gitualizer.operations.planner import OperationPlanner, state_fingerprint
 from gitualizer.ui.file_status_widget import FileStatusWidget
 from gitualizer.ui.graph_widget import CommitGraphWidget
+from gitualizer.ui.stash_widget import StashWidget
 
 
 class MainWindow(QMainWindow):
@@ -84,6 +86,7 @@ class MainWindow(QMainWindow):
         self.file_status = FileStatusWidget()
         self.refs_table = self._table(["Kind", "Name", "Target", "Upstream", "Ahead/Behind"])
         self.remotes_table = self._table(["Remote", "Fetch URL", "Push URL"])
+        self.stash_widget = StashWidget()
         self.summary = QLabel("No repository loaded.")
         self.summary.setWordWrap(True)
         self.summary.setObjectName("summary")
@@ -96,15 +99,17 @@ class MainWindow(QMainWindow):
         self.working_panel = self._panel("Working Tree and Index", self.file_status)
 
         self.repo_panel = self._panel("Repository State", self.summary)
-        self.refs_panel = self._panel("References", self.refs_table)
-        self.remotes_panel = self._panel("Remotes", self.remotes_table)
+        self.details_tabs = QTabWidget()
+        self.references_tab_index = self.details_tabs.addTab(self.refs_table, "References")
+        self.stashes_tab_index = self.details_tabs.addTab(self.stash_widget, "Stashes")
+        self.remotes_tab_index = self.details_tabs.addTab(self.remotes_table, "Remotes")
+        self.details_tabs.setCurrentIndex(self.stashes_tab_index)
         self.right_panel = QWidget()
         right_layout = QVBoxLayout(self.right_panel)
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(8)
         right_layout.addWidget(self.repo_panel)
-        right_layout.addWidget(self.refs_panel, 2)
-        right_layout.addWidget(self.remotes_panel, 1)
+        right_layout.addWidget(self.details_tabs, 1)
 
         self.graph_scroll = graph_scroll
         self.graph_scroll.verticalScrollBar().valueChanged.connect(self._maybe_load_more_commits)
@@ -119,6 +124,10 @@ class MainWindow(QMainWindow):
         self.main_splitter.setSizes([220, 700, 360])
 
         self.command_panel_group = self._panel("Operation / Preview / Commands", self.command_panel)
+        self.command_panel_group.setCheckable(True)
+        self.command_panel_group.setChecked(True)
+        self.command_panel_group.setToolTip("Uncheck to collapse the command preview and give more space to repository panels.")
+        self.command_panel_group.toggled.connect(self._set_command_panel_expanded)
 
         root = QWidget()
         root_layout = QVBoxLayout(root)
@@ -142,6 +151,9 @@ class MainWindow(QMainWindow):
         self.graph.commitsDroppedOnReference.connect(self._handle_commits_drop_on_reference)
         self.graph.commitsDroppedOnCommit.connect(self._handle_commits_drop_on_commit)
         self.graph.commitsDroppedToTrash.connect(self._handle_commits_drop_to_trash)
+        self.graph.stashDroppedOnBranch.connect(self._handle_stash_drop_on_branch)
+        self.graph.stashDroppedToTrash.connect(self._handle_stash_drop_to_trash)
+        self.stash_widget.changesDropped.connect(self._handle_changes_drop_to_stash)
         self.graph.referenceDroppedToTrash.connect(self._handle_reference_drop_to_trash)
         self.graph.commitContextRequested.connect(self._show_commit_context_menu)
         self.graph.referenceContextRequested.connect(self._show_reference_context_menu)
@@ -149,6 +161,7 @@ class MainWindow(QMainWindow):
         self.file_status.changesDroppedToWorking.connect(self._handle_changes_drop_to_working)
         self.file_status.changesDroppedToTrash.connect(self._handle_changes_drop_to_trash)
         self.file_status.changeActivated.connect(self._show_file_diff)
+        self.file_status.stashDroppedToWorking.connect(self._handle_stash_drop_to_working)
 
         self.refresh_timer = QTimer(self)
         self.refresh_timer.setInterval(2500)
@@ -182,6 +195,9 @@ class MainWindow(QMainWindow):
         view_menu.addAction("Graph Focus", self._graph_focus_mode)
         view_menu.addAction("Status Focus", self._status_focus_mode)
         view_menu.addAction("Command Focus", self._command_focus_mode)
+        self.stashes_action = QAction("Open Stashes", self)
+        self.stashes_action.triggered.connect(self._show_stashes_tab)
+        view_menu.addAction(self.stashes_action)
         view_menu.addSeparator()
         view_menu.addAction("Graph Layout: Commits", self._commits_layout)
         view_menu.addAction("Graph Layout: Branches", self._branches_layout)
@@ -283,6 +299,10 @@ class MainWindow(QMainWindow):
         layout.addWidget(child)
         return group
 
+    def _set_command_panel_expanded(self, expanded: bool) -> None:
+        self.command_panel.setVisible(expanded)
+        self.command_panel_group.updateGeometry()
+
     def _browse(self) -> None:
         selected = QFileDialog.getExistingDirectory(self, "Open Git Repository", self.path_edit.text())
         if selected:
@@ -351,6 +371,7 @@ class MainWindow(QMainWindow):
         self._set_changes(self.state.changes)
         self._set_refs(self.state.references)
         self._set_remotes(self.state)
+        self.stash_widget.set_stashes(self.state.stashes)
         self._refresh_controls(self.state)
         self._set_enabled(True)
         self.refresh_in_progress = False
@@ -377,6 +398,7 @@ class MainWindow(QMainWindow):
         self._set_changes([])
         self._set_refs([])
         self._set_remotes(None)
+        self.stash_widget.set_stashes([])
         self._set_enabled(False)
 
     def _set_enabled(self, enabled: bool) -> None:
@@ -763,6 +785,61 @@ class MainWindow(QMainWindow):
             return
         self._choose_preview_and_execute(f"{len(sources)} selected commits", "trash", plans)
 
+    def _stash_by_ref(self, ref: str) -> Optional[Stash]:
+        if self.state is None:
+            return None
+        return next((stash for stash in self.state.stashes if stash.ref == ref), None)
+
+    def _handle_stash_drop_on_branch(self, stash_ref: str, branch: Reference) -> None:
+        if self.state is None:
+            return
+        stash = self._stash_by_ref(stash_ref)
+        if stash is None:
+            QMessageBox.information(self, "Stash Changed", "That stash no longer exists. Refresh and try again.")
+            return
+        try:
+            plan = self.planner.apply_stash_to_branch(self.state, stash, branch)
+        except ValueError as exc:
+            QMessageBox.information(self, "Operation Not Available", str(exc))
+            return
+        self._preview_and_confirm(plan)
+
+    def _handle_changes_drop_to_stash(self, changes: list[FileChange]) -> None:
+        if self.state is None:
+            return
+        message, accepted = QInputDialog.getText(
+            self,
+            "Create Stash",
+            "Stash name:",
+            text="Selected working-tree files",
+        )
+        if not accepted:
+            return
+        try:
+            plan = self.planner.stash_paths(self.state, changes, message)
+        except ValueError as exc:
+            QMessageBox.information(self, "Operation Not Available", str(exc))
+            return
+        self._preview_and_confirm(plan)
+
+    def _handle_stash_drop_to_working(self, stash_ref: str) -> None:
+        if self.state is None:
+            return
+        stash = self._stash_by_ref(stash_ref)
+        if stash is None:
+            QMessageBox.information(self, "Stash Changed", "That stash no longer exists. Refresh and try again.")
+            return
+        self._preview_and_confirm(self.planner.apply_stash_to_working_tree(self.state, stash))
+
+    def _handle_stash_drop_to_trash(self, stash_ref: str) -> None:
+        if self.state is None:
+            return
+        stash = self._stash_by_ref(stash_ref)
+        if stash is None:
+            QMessageBox.information(self, "Stash Changed", "That stash no longer exists. Refresh and try again.")
+            return
+        self._preview_and_confirm(self.planner.drop_stash(self.state, stash))
+
     def _handle_reference_drop_to_trash(self, source: Reference) -> None:
         if self.state is None:
             return
@@ -879,6 +956,10 @@ class MainWindow(QMainWindow):
         self.graph_scroll.show()
         self.right_panel.hide()
         self.command_panel_group.show()
+
+    def _show_stashes_tab(self) -> None:
+        self.right_panel.show()
+        self.details_tabs.setCurrentIndex(self.stashes_tab_index)
 
     def _commits_layout(self) -> None:
         self.graph.set_mode("commits")

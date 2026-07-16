@@ -8,14 +8,12 @@ from PySide6.QtGui import QDrag
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QVBoxLayout, QWidget
 
 from gitualizer.model.repository_state import FileChange
-
-
-CHANGE_MIME = "application/x-gitualizer-file-changes"
-STAGE_MIME = "application/x-gitualizer-stage"
+from gitualizer.ui.drag_mime import CHANGE_MIME, STAGE_MIME, STASH_MIME
 
 
 class ChangeListWidget(QListWidget):
     changesDropped = Signal(object)
+    stashDropped = Signal(str)
     dragStarted = Signal(str)
     dragEnded = Signal()
 
@@ -57,6 +55,10 @@ class ChangeListWidget(QListWidget):
         self.dragEnded.emit()
 
     def dragEnterEvent(self, event) -> None:  # noqa: N802
+        if self.area == "working" and event.mimeData().hasFormat(STASH_MIME):
+            self._set_drop_active(True)
+            event.acceptProposedAction()
+            return
         if event.mimeData().hasFormat(CHANGE_MIME):
             self._set_drop_active(True)
             event.acceptProposedAction()
@@ -72,6 +74,14 @@ class ChangeListWidget(QListWidget):
 
     def dropEvent(self, event) -> None:  # noqa: N802
         self._set_drop_active(False)
+        if self.area == "working" and event.mimeData().hasFormat(STASH_MIME):
+            stash_ref = bytes(event.mimeData().data(STASH_MIME)).decode("utf-8", errors="ignore")
+            if stash_ref:
+                self.stashDropped.emit(stash_ref)
+                event.acceptProposedAction()
+                return
+            event.ignore()
+            return
         if not event.mimeData().hasFormat(CHANGE_MIME):
             event.ignore()
             return
@@ -96,6 +106,7 @@ class FileStatusWidget(QWidget):
     changesDroppedToWorking = Signal(object)
     changesDroppedToTrash = Signal(object)
     changeActivated = Signal(object)
+    stashDroppedToWorking = Signal(str)
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -107,6 +118,7 @@ class FileStatusWidget(QWidget):
         self.staged_list.setAcceptDrops(True)
         self.staged_list.changesDropped.connect(lambda changes: self.changesDroppedToStage.emit(changes))
         self.working_list.changesDropped.connect(lambda changes: self.changesDroppedToWorking.emit(changes))
+        self.working_list.stashDropped.connect(self.stashDroppedToWorking.emit)
         self.trash_zone.changesDropped.connect(lambda changes: self.changesDroppedToTrash.emit(changes))
         self.working_list.itemDoubleClicked.connect(self._activate_item)
         self.staged_list.itemDoubleClicked.connect(self._activate_item)
