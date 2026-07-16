@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import QTimer, Qt
-from PySide6.QtGui import QAction
+from PySide6.QtGui import QAction, QFont
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -54,12 +54,15 @@ class MainWindow(QMainWindow):
         self.refresh_in_progress = False
         self.commit_limit = 300
         self.fetch_in_progress = False
+        self.ui_scale = 1.0
+        self._base_application_font = QApplication.font()
         self.setWindowTitle("Gitualizer")
         self.resize(980, 640)
         self.setStyleSheet(APP_STYLE)
 
         self.path_edit = QLineEdit(str(initial_path or Path.cwd()))
         self.path_edit.setPlaceholderText("Path inside a Git repository")
+        self.path_edit.textChanged.connect(self._clear_path_error)
         self.open_button = QPushButton("Browse")
         self.refresh_button = QPushButton("Refresh")
 
@@ -134,6 +137,9 @@ class MainWindow(QMainWindow):
         self.graph.stageDroppedOnBranch.connect(self._handle_stage_drop_on_branch)
         self.graph.commitDroppedOnCommit.connect(self._handle_commit_drop_on_commit)
         self.graph.commitDroppedToTrash.connect(self._handle_commit_drop_to_trash)
+        self.graph.commitsDroppedOnReference.connect(self._handle_commits_drop_on_reference)
+        self.graph.commitsDroppedOnCommit.connect(self._handle_commits_drop_on_commit)
+        self.graph.commitsDroppedToTrash.connect(self._handle_commits_drop_to_trash)
         self.graph.referenceDroppedToTrash.connect(self._handle_reference_drop_to_trash)
         self.graph.commitContextRequested.connect(self._show_commit_context_menu)
         self.graph.referenceContextRequested.connect(self._show_reference_context_menu)
@@ -178,6 +184,25 @@ class MainWindow(QMainWindow):
         view_menu.addAction("Graph Layout: Commits", self._commits_layout)
         view_menu.addAction("Graph Layout: Branches", self._branches_layout)
         view_menu.addAction("Graph Layout: Local vs Remote", self._local_remote_layout)
+        view_menu.addSeparator()
+        graph_options = view_menu.addMenu("Graph Visualization")
+        width_menu = graph_options.addMenu("Lane Width")
+        width_menu.addAction("Compact", lambda: self.graph.set_visualization(lane_spacing=56))
+        width_menu.addAction("Comfortable", lambda: self.graph.set_visualization(lane_spacing=72))
+        width_menu.addAction("Wide", lambda: self.graph.set_visualization(lane_spacing=108))
+        height_menu = graph_options.addMenu("Row Height")
+        height_menu.addAction("Compact", lambda: self.graph.set_visualization(row_spacing=38))
+        height_menu.addAction("Comfortable", lambda: self.graph.set_visualization(row_spacing=52))
+        height_menu.addAction("Tall", lambda: self.graph.set_visualization(row_spacing=76))
+        view_menu.addSeparator()
+        scale_menu = view_menu.addMenu("Interface Scale")
+        zoom_in = scale_menu.addAction("Increase Size", lambda: self._change_ui_scale(0.1))
+        zoom_in.setShortcuts(["Ctrl++", "Ctrl+="])
+        zoom_out = scale_menu.addAction("Decrease Size", lambda: self._change_ui_scale(-0.1))
+        zoom_out.setShortcut("Ctrl+-")
+        reset_zoom = scale_menu.addAction("Actual Size", self._reset_ui_scale)
+        reset_zoom.setShortcut("Ctrl+0")
+        graph_options.addAction("Reset Graph Spacing", self._reset_graph_visualization)
         view_menu.addSeparator()
         view_menu.addAction("Toggle Full Screen", self._toggle_fullscreen)
         view_menu.addAction("Maximized", self.showMaximized)
@@ -261,21 +286,27 @@ class MainWindow(QMainWindow):
         if self.refresh_in_progress:
             return
         self.refresh_in_progress = True
+        requested_path = Path(self.path_edit.text()).expanduser()
+        if not requested_path.exists() or not requested_path.is_dir():
+            message = (
+                f"The repository path does not exist: {requested_path}"
+                if not requested_path.exists()
+                else f"The repository path is not a directory: {requested_path}"
+            )
+            self._show_path_error(message)
+            self._clear_repository_state()
+            self.refresh_in_progress = False
+            return
         try:
-            self.state = self.reader.read(Path(self.path_edit.text()), commit_limit=self.commit_limit)
+            self.state = self.reader.read(requested_path, commit_limit=self.commit_limit)
         except GitError as exc:
-            self.state = None
-            self.graph.set_state(None)
-            self.graph.set_preview_plan(None)
-            self.summary.setText("No repository loaded.")
-            self._set_changes([])
-            self._set_refs([])
-            self._set_remotes(None)
-            self._set_enabled(False)
+            self._show_path_error("The selected directory is not a readable Git repository.")
+            self._clear_repository_state()
             if show_errors:
                 QMessageBox.warning(self, "Unable to Open Repository", str(exc))
             self.refresh_in_progress = False
             return
+        self._clear_path_error()
         self.graph.set_state(self.state)
         self._set_summary(self.state)
         self._set_changes(self.state.changes)
@@ -284,6 +315,30 @@ class MainWindow(QMainWindow):
         self._refresh_controls(self.state)
         self._set_enabled(True)
         self.refresh_in_progress = False
+
+    def _show_path_error(self, message: str) -> None:
+        self.path_edit.setProperty("invalid", True)
+        self.path_edit.setToolTip(message)
+        self.path_edit.style().unpolish(self.path_edit)
+        self.path_edit.style().polish(self.path_edit)
+        self.summary.setText(message)
+
+    def _clear_path_error(self) -> None:
+        if not self.path_edit.property("invalid"):
+            return
+        self.path_edit.setProperty("invalid", False)
+        self.path_edit.setToolTip("")
+        self.path_edit.style().unpolish(self.path_edit)
+        self.path_edit.style().polish(self.path_edit)
+
+    def _clear_repository_state(self) -> None:
+        self.state = None
+        self.graph.set_state(None)
+        self.graph.set_preview_plan(None)
+        self._set_changes([])
+        self._set_refs([])
+        self._set_remotes(None)
+        self._set_enabled(False)
 
     def _set_enabled(self, enabled: bool) -> None:
         self.graph.setEnabled(enabled)
@@ -578,9 +633,9 @@ class MainWindow(QMainWindow):
         dialog.setWindowTitle(f"Diff: {change.path}")
         dialog.resize(860, 620)
         layout = QVBoxLayout(dialog)
-        viewer = QTextEdit()
+        viewer = QTextBrowser()
         viewer.setReadOnly(True)
-        viewer.setPlainText(text)
+        viewer.setHtml(_render_diff_html(text))
         layout.addWidget(viewer)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         buttons.rejected.connect(dialog.reject)
@@ -623,6 +678,36 @@ class MainWindow(QMainWindow):
             )
             return
         self._choose_preview_and_execute(source.short_oid, "trash", plans)
+
+    def _handle_commits_drop_on_reference(self, sources: list[Commit], target: Reference) -> None:
+        if self.state is None:
+            return
+        try:
+            plan = self.planner.cherry_pick_commits_to_branch(self.state, sources, target)
+        except ValueError as exc:
+            QMessageBox.information(self, "Operation Not Available", str(exc))
+            return
+        self._preview_and_confirm(plan)
+
+    def _handle_commits_drop_on_commit(self, sources: list[Commit], target: Commit) -> None:
+        if self.state is None:
+            return
+        try:
+            plan = self.planner.replay_commits_after(self.state, sources, target)
+        except ValueError as exc:
+            QMessageBox.information(self, "Operation Not Available", str(exc))
+            return
+        self._preview_and_confirm(plan)
+
+    def _handle_commits_drop_to_trash(self, sources: list[Commit]) -> None:
+        if self.state is None:
+            return
+        try:
+            plan = self.planner.drop_commits_from_current_branch(self.state, sources)
+        except ValueError as exc:
+            QMessageBox.information(self, "Operation Not Available", str(exc))
+            return
+        self._preview_and_confirm(plan)
 
     def _handle_reference_drop_to_trash(self, source: Reference) -> None:
         if self.state is None:
@@ -753,6 +838,26 @@ class MainWindow(QMainWindow):
     def _local_remote_layout(self) -> None:
         self.graph.set_mode("local_remote")
         self._workspace_mode()
+
+    def _reset_graph_visualization(self) -> None:
+        self.graph.set_visualization(row_spacing=52, lane_spacing=72)
+
+    def _change_ui_scale(self, delta: float) -> None:
+        self._set_ui_scale(self.ui_scale + delta)
+
+    def _reset_ui_scale(self) -> None:
+        self._set_ui_scale(1.0)
+
+    def _set_ui_scale(self, scale: float) -> None:
+        scale = max(0.7, min(1.8, round(scale, 2)))
+        if scale == self.ui_scale:
+            return
+        self.ui_scale = scale
+        font = QFont(self._base_application_font)
+        font.setPointSizeF(self._base_application_font.pointSizeF() * scale)
+        QApplication.setFont(font)
+        self.graph.set_visualization(zoom=scale)
+        self.centralWidget().updateGeometry()
 
     def _toggle_fullscreen(self) -> None:
         if self.isFullScreen():
@@ -1052,12 +1157,33 @@ def _render_result_text(result: ExecutionResult) -> str:
     return "\n".join(lines)
 
 
+def _render_diff_html(diff: str) -> str:
+    rendered: list[str] = []
+    for line in diff.splitlines():
+        if line.startswith("+") and not line.startswith("+++"):
+            color, background = "#116329", "#dafbe1"
+        elif line.startswith("-") and not line.startswith("---"):
+            color, background = "#cf222e", "#ffebe9"
+        elif line.startswith("@@"):
+            color, background = "#0550ae", "#ddf4ff"
+        else:
+            color, background = "#111111", "transparent"
+        rendered.append(
+            f'<span style="color:{color}; background-color:{background};">{html.escape(line)}</span>'
+        )
+    body = "\n".join(rendered) or '<span style="color:#111111;">No diff output.</span>'
+    return (
+        '<pre style="margin:0; white-space:pre-wrap; color:#111111; '
+        'font-family:JetBrains Mono, DejaVu Sans Mono, monospace;">'
+        f"{body}</pre>"
+    )
+
+
 APP_STYLE = """
 QMainWindow, QWidget {
     background: #f6f8fa;
     color: #1f2937;
     font-family: "Inter", "Segoe UI", "Noto Sans", sans-serif;
-    font-size: 9pt;
 }
 QMenuBar {
     background: #ffffff;
@@ -1096,6 +1222,10 @@ QLineEdit, QTextEdit, QTextBrowser, QTableWidget, QListWidget, QLabel#dropZone, 
     border-radius: 6px;
     padding: 4px;
     selection-background-color: #d8ecff;
+}
+QLineEdit[invalid="true"] {
+    border: 2px solid #cf222e;
+    background: #ffebe9;
 }
 QTextEdit, QTextBrowser {
     font-family: "JetBrains Mono", "DejaVu Sans Mono", monospace;
