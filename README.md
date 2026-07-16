@@ -8,9 +8,12 @@ Instead of starting with a Git command, you start with the graph:
 - drag a commit onto a branch to cherry-pick or revert it;
 - drag a branch or commit to the trash to see the available removal options;
 - drag a rectangle around commits to move or remove them as a group;
-- drag files between the working tree and staging area.
+- drag files between the working tree and staging area;
 - drag working-tree files onto the stash panel to save them;
 - drag a stash onto a branch or the working tree to apply it, or onto the trash to delete it.
+
+When creating a stash, Gitualizer asks for its name. Stashes belong to the
+repository, so a stash created on one branch can be applied to another branch.
 
 Gitualizer does not run a graph operation immediately. It first creates a plan,
 shows the exact Git commands and their expected effects, and asks for
@@ -110,13 +113,14 @@ src/gitualizer/
   ui/graph_widget.py          Painted graph and graph interactions
   ui/file_status_widget.py    Working tree and staging interactions
   ui/stash_widget.py          Draggable stash list
+  ui/drag_mime.py             Shared drag-and-drop MIME types
 ```
 
 ### Git and model layers
 
 `GitRunner` runs Git with argument lists instead of shell command strings.
 `RepositoryReader` uses it to read HEAD, commits, reflogs, branches, tags,
-remotes, file changes, and operations in progress.
+remotes, stashes, file changes, and operations in progress.
 
 The reader converts Git output into the frozen dataclasses in
 `repository_state.py`. UI code should use these objects instead of parsing Git
@@ -134,6 +138,20 @@ emits signals, but it does not run Git commands.
 `FileStatusWidget` handles working-tree and staging-area drag and drop. It also
 emits model objects through signals.
 
+`StashWidget` lists repository stashes. Files can be dropped onto it to create a
+named stash. A stash can be dragged onto a branch or the working tree to apply
+it. Dropping it onto the graph trash runs `git stash drop`, which deletes the
+stash without applying its files.
+
+References, Stashes, and Remotes share the right side through tabs. Stashes is
+the initial tab, and **View → Open Stashes** selects it. The bottom command
+preview is collapsible when more graph or panel space is needed.
+
+Cross-component dragging uses the MIME names in `ui/drag_mime.py`. The source
+widget writes a small payload to `QMimeData`; the destination widget decodes it
+and emits a Qt signal. `MainWindow` then creates the operation plan. This lets
+widgets interact without calling each other or running Git directly.
+
 ### Planning and execution
 
 `OperationPlanner` returns a `CommandPlan`. A plan contains:
@@ -150,6 +168,10 @@ stale plan from running against a different repository state.
 
 `CommandExecutor` runs the confirmed steps, stops on failure, and returns the
 results to the UI.
+
+Stash plans follow the same path as graph plans. Creating a stash uses selected
+working-tree paths, applying keeps the stash available, and deleting a stash is
+an explicit destructive plan.
 
 ## Extending Gitualizer
 
@@ -189,6 +211,10 @@ Do not parse raw Git output inside UI code.
 
 Create a widget under `ui/`, feed it from `RepositoryState`, and update it from
 `MainWindow.refresh()`. Use signals to report user actions back to the window.
+
+For drag-and-drop between panels, add a shared type in `ui/drag_mime.py`, encode
+only model identifiers or model data, and let the receiving widget emit a
+signal. Keep planning and execution in `MainWindow` and `operations/`.
 
 ## Testing
 
