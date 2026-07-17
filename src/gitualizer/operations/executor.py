@@ -8,6 +8,7 @@ from gitualizer.operations.command_plan import CommandPlan, ExecutionResult, Ste
 
 
 REMOTE_AUTH_COMMANDS = frozenset({"clone", "fetch", "ls-remote", "pull", "push", "submodule"})
+REMOTE_AUTH_TIMEOUT_SECONDS = 120
 
 
 class CommandExecutor:
@@ -32,7 +33,10 @@ class CommandExecutor:
             command_name = args[1] if len(args) > 1 else ""
             if command_name in REMOTE_AUTH_COMMANDS:
                 result = self.runner.run_interactive(
-                    args[1:], cwd=cwd, env=remote_auth_environment(interactive=True)
+                    args[1:],
+                    cwd=cwd,
+                    env=remote_auth_environment(interactive=True),
+                    timeout=REMOTE_AUTH_TIMEOUT_SECONDS,
                 )
             else:
                 result = self.runner.run(

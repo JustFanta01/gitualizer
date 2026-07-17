@@ -4,12 +4,41 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 import os
+import signal
 import subprocess
 import tempfile
+import threading
 from typing import Callable, Optional, Union
 
 
 AUTH_SESSION_SECONDS = 300
+INTERACTIVE_COMMAND_TIMEOUT = 300
+INTERRUPT_SIGNALS = (signal.SIGINT,)
+_active_interactive_commands = 0
+_terminal_interrupt_callback: Optional[Callable[[], None]] = None
+
+
+def install_terminal_interrupt_protection(on_interrupt: Optional[Callable[[], None]] = None) -> None:
+    """Let Ctrl+C cancel interactive Git without closing Gitualizer."""
+    if threading.current_thread() is not threading.main_thread():
+        return
+    global _terminal_interrupt_callback
+    _terminal_interrupt_callback = on_interrupt
+    signal.signal(signal.SIGINT, _handle_terminal_interrupt)
+
+
+def _handle_terminal_interrupt(signum: int, frame: object) -> None:
+    if _active_interactive_commands:
+        return
+    if _terminal_interrupt_callback is not None:
+        _terminal_interrupt_callback()
+        return
+    raise KeyboardInterrupt
+
+
+def _restore_interactive_child_signals() -> None:
+    for sig in INTERRUPT_SIGNALS:
+        signal.signal(sig, signal.SIG_DFL)
 
 
 def remote_auth_environment(*, interactive: bool) -> dict[str, str]:
@@ -167,6 +196,7 @@ class GitRunner:
         cwd: Optional[Union[Path, str]] = None,
         *,
         env: Optional[dict[str, str]] = None,
+        timeout: Optional[float] = INTERACTIVE_COMMAND_TIMEOUT,
     ) -> GitResult:
         """Run Git with the parent's terminal and environment.
 
@@ -181,13 +211,29 @@ class GitRunner:
             process_env = os.environ.copy()
             process_env.update(env)
             run_kwargs["env"] = process_env
+        if os.name == "posix":
+            run_kwargs["preexec_fn"] = _restore_interactive_child_signals
+        if timeout is not None:
+            run_kwargs["timeout"] = timeout
         self._emit("started", command, cwd_path, interactive=True)
+        global _active_interactive_commands
+        _active_interactive_commands += 1
         try:
             completed = subprocess.run(command, **run_kwargs)
+        except subprocess.TimeoutExpired:
+            completed = subprocess.CompletedProcess(
+                command,
+                124,
+                stderr=f"Command timed out after {timeout} seconds.",
+            )
+        except KeyboardInterrupt:
+            completed = subprocess.CompletedProcess(command, 130, stderr="Command interrupted.")
         except OSError as exc:
             failed = GitResult(command, cwd_path, "", str(exc), 126)
             self._emit("finished", command, cwd_path, interactive=True, result=failed)
             raise
-        result = GitResult(command, cwd_path, "", "", completed.returncode)
+        finally:
+            _active_interactive_commands -= 1
+        result = GitResult(command, cwd_path, "", completed.stderr or "", completed.returncode)
         self._emit("finished", command, cwd_path, interactive=True, result=result)
         return result

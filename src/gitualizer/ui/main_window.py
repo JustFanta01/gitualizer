@@ -41,12 +41,16 @@ from PySide6.QtWidgets import (
 from gitualizer.git.repository import RepositoryReader
 from gitualizer.git.runner import AUTH_SESSION_SECONDS, CommandEvent, GitError, GitResult, remote_auth_environment
 from gitualizer.model.repository_state import Commit, FileChange, Reference, RepositoryState, Stash
-from gitualizer.operations.command_plan import CommandPlan, ExecutionResult
-from gitualizer.operations.executor import CommandExecutor
+from gitualizer.operations.command_plan import CommandPlan, ExecutionResult, StepResult
+from gitualizer.operations.executor import CommandExecutor, REMOTE_AUTH_COMMANDS
 from gitualizer.operations.planner import OperationPlanner, state_fingerprint
 from gitualizer.ui.file_status_widget import FileStatusWidget
 from gitualizer.ui.graph_widget import CommitGraphWidget
 from gitualizer.ui.stash_widget import StashWidget
+
+
+FETCH_INTERACTIVE_TIMEOUT_SECONDS = 45
+FETCH_NONINTERACTIVE_TIMEOUT_SECONDS = 8
 
 
 class MainWindow(QMainWindow):
@@ -65,6 +69,7 @@ class MainWindow(QMainWindow):
         self.commit_limit = 300
         self.fetch_in_progress = False
         self._terminal_alert: Optional[QMessageBox] = None
+        self.network_state = "unknown"
         self.auth_state = "not_checked"
         self.last_auth_command_at: Optional[float] = None
         self.last_remote_command_at: Optional[float] = None
@@ -171,10 +176,15 @@ class MainWindow(QMainWindow):
         root_layout.addWidget(self.main_splitter, 1)
         root_layout.addWidget(self.command_panel_group)
         self.setCentralWidget(root)
-        self.auth_status_button = QPushButton("Auth: Not checked")
+        self.network_status_button = QPushButton("Network: Unknown")
+        self.network_status_button.setObjectName("networkStatusButton")
+        self.network_status_button.setProperty("networkState", "unknown")
+        self.network_status_button.setToolTip("Remote network reachability is checked by fetch.")
+        self.statusBar().addPermanentWidget(self.network_status_button)
+        self.auth_status_button = QPushButton("Remote auth: Not checked")
         self.auth_status_button.setObjectName("authStatusButton")
         self.auth_status_button.setProperty("authState", "not_checked")
-        self.auth_status_button.setToolTip("Remote authentication is handled entirely by Git and the terminal.")
+        self.auth_status_button.setToolTip("Remote SSH/HTTPS authentication is handled entirely by Git and the terminal.")
         self.statusBar().addPermanentWidget(self.auth_status_button)
         self.commandEventReceived.connect(self._append_command_event)
         self.fetchFinished.connect(self._finish_fetch)
@@ -403,6 +413,18 @@ class MainWindow(QMainWindow):
         self.auth_status_button.style().polish(self.auth_status_button)
         self._update_auth_status_label()
 
+    def _set_network_status(self, state: str) -> None:
+        self.network_state = state
+        self.network_status_button.setProperty("networkState", state)
+        self.network_status_button.style().unpolish(self.network_status_button)
+        self.network_status_button.style().polish(self.network_status_button)
+        labels = {
+            "unknown": "Unknown",
+            "online": "Online",
+            "offline": "Offline",
+        }
+        self.network_status_button.setText(f"Network: {labels[self.network_state]}.")
+
     def _update_auth_status_label(self) -> None:
         labels = {
             "not_checked": "Not checked",
@@ -410,7 +432,7 @@ class MainWindow(QMainWindow):
             "authenticated": "Authenticated",
             "unavailable": "Unavailable",
         }
-        self.auth_status_button.setText(f"Auth: {labels[self.auth_state]}.")
+        self.auth_status_button.setText(f"Remote auth: {labels[self.auth_state]}.")
 
     def _auth_details_html(self) -> str:
         def elapsed(timestamp: Optional[float]) -> str:
@@ -440,6 +462,7 @@ class MainWindow(QMainWindow):
             if show_details
             else "Use the terminal that launched Gitualizer. Gitualizer does not read or redirect credentials."
         )
+        alert.setStandardButtons(QMessageBox.StandardButton.Close)
         return alert
 
     def _show_auth_explanation(self) -> None:
@@ -485,7 +508,7 @@ class MainWindow(QMainWindow):
         repository_path = self.state.path
         if interactive:
             self._terminal_alert = self._create_auth_alert(show_details=False)
-            self._terminal_alert.setStandardButtons(QMessageBox.StandardButton.NoButton)
+            self._terminal_alert.finished.connect(lambda _result: setattr(self, "_terminal_alert", None))
             self._terminal_alert.show()
             self.statusBar().showMessage(
                 "Fetching in the background; complete any Git/SSH prompt in the terminal."
@@ -502,6 +525,7 @@ class MainWindow(QMainWindow):
                         ["fetch", "--all", "--prune"],
                         cwd=repository_path,
                         env=remote_auth_environment(interactive=True),
+                        timeout=FETCH_INTERACTIVE_TIMEOUT_SECONDS,
                     )
                 else:
                     result = self.reader.runner.run(
@@ -514,7 +538,7 @@ class MainWindow(QMainWindow):
                             "SSH_ASKPASS": "echo",
                             **remote_auth_environment(interactive=False),
                         },
-                        timeout=15,
+                        timeout=FETCH_NONINTERACTIVE_TIMEOUT_SECONDS,
                     )
             except OSError as exc:
                 result = GitResult(
@@ -531,30 +555,57 @@ class MainWindow(QMainWindow):
     def _finish_fetch(self, result: GitResult, interactive: bool) -> None:
         self.last_remote_command_at = time.monotonic()
         if interactive and self._terminal_alert is not None:
-            self._terminal_alert.hide()
-            self._terminal_alert.deleteLater()
+            alert = self._terminal_alert
             self._terminal_alert = None
+            alert.hide()
+            alert.deleteLater()
         self.fetch_in_progress = False
         self.fetch_timer.start()
 
         if result.returncode == 0:
+            self._set_network_status("online")
             self._set_auth_status("authenticated")
             self.statusBar().showMessage("Remote-tracking branches updated.", 4000)
             if self.state is not None and result.cwd == self.state.path:
                 self.refresh(show_errors=False)
             return
 
+        exit_text = f"exit {result.returncode}"
         if result.returncode == 124:
+            self._set_network_status("offline")
             self._set_auth_status("unavailable")
-            message = "Remote fetch timed out. Gitualizer remains available offline."
+            message = f"Remote fetch timed out ({exit_text}). Gitualizer remains available offline."
         elif interactive:
-            self._set_auth_status("unavailable")
-            message = "Fetch failed; see the terminal for Git's error. Gitualizer remains available offline."
+            if result.returncode == 130:
+                self._set_network_status("unknown")
+                self._set_auth_status("required")
+                message = (
+                    f"Fetch canceled ({exit_text}); authentication was not completed. "
+                    "Gitualizer remains available offline."
+                )
+            else:
+                auth_failure = _looks_like_auth_failure(result.stderr)
+                if auth_failure or not result.stderr.strip():
+                    self._set_network_status("unknown")
+                    self._set_auth_status("required")
+                else:
+                    self._set_network_status("offline")
+                    self._set_auth_status("unavailable")
+                message = f"Fetch failed ({exit_text}); see the terminal for Git's error. Gitualizer remains available offline."
         else:
-            self._set_auth_status("required" if _looks_like_auth_failure(result.stderr) else "unavailable")
+            auth_failure = _looks_like_auth_failure(result.stderr)
+            self._set_network_status("online" if auth_failure else "offline")
+            self._set_auth_status("required" if auth_failure else "unavailable")
+            if auth_failure:
+                self.statusBar().showMessage(
+                    f"Remote authentication required ({exit_text}); opening terminal prompt.",
+                    12000,
+                )
+                self._start_fetch(interactive=True)
+                return
             detail = result.stderr.strip().splitlines()
             reason = detail[-1] if detail else "the remote could not be reached"
-            message = f"Remote unavailable: {reason}. Gitualizer remains available offline."
+            message = f"Remote unavailable ({exit_text}): {reason}. Gitualizer remains available offline."
         self.statusBar().showMessage(message, 12000)
 
     def refresh(self, show_errors: bool = True) -> None:
@@ -599,6 +650,7 @@ class MainWindow(QMainWindow):
         if self.state.path != previous_path:
             self.last_auth_command_at = None
             self.last_remote_command_at = None
+            self._set_network_status("unknown")
             self._set_auth_status("not_checked")
             # Authenticate through Git/SSH once when a repository is opened.
             # Later timer fetches are non-interactive and can never prompt.
@@ -623,6 +675,7 @@ class MainWindow(QMainWindow):
         self.state = None
         self.last_auth_command_at = None
         self.last_remote_command_at = None
+        self._set_network_status("unknown")
         self._set_auth_status("not_checked")
         self.graph.set_state(None)
         self.graph.set_preview_plan(None)
@@ -723,11 +776,79 @@ class MainWindow(QMainWindow):
             self.refresh()
             return
         result = self.executor.execute(plan, current_state.path)
+        self._update_remote_status_from_execution(result, current_state.path)
         self.command_panel.setHtml(_render_plan_html(plan, details_open=True) + _render_result_html(result))
         self.graph.set_preview_plan(None)
         self.refresh()
         if not result.success:
             QMessageBox.warning(self, "Git Command Failed", _render_result_text(result))
+
+    def _update_remote_status_from_execution(self, result: ExecutionResult, repository_path: Path) -> None:
+        remote_steps = [step for step in result.steps if _is_remote_step(step.args)]
+        if not remote_steps:
+            return
+        failed = next((step for step in remote_steps if step.returncode != 0), None)
+        if failed is None:
+            self._set_network_status("online")
+            self._set_auth_status("authenticated")
+            self.statusBar().showMessage("Remote command completed; network online and remote auth available.", 5000)
+            return
+        self._update_remote_status_from_failed_step(failed, repository_path)
+
+    def _update_remote_status_from_failed_step(self, step: StepResult, repository_path: Path) -> None:
+        probe = None
+        stderr = step.stderr
+        if not stderr.strip() and step.returncode not in {124, 130}:
+            remote = _remote_name_from_step(step.args)
+            probe_args = ["ls-remote", "--heads"]
+            if remote:
+                probe_args.append(remote)
+            probe = self.reader.runner.run(
+                probe_args,
+                cwd=repository_path,
+                check=False,
+                env={
+                    "GIT_TERMINAL_PROMPT": "0",
+                    "GIT_ASKPASS": "echo",
+                    "SSH_ASKPASS": "echo",
+                    **remote_auth_environment(interactive=False),
+                },
+                timeout=FETCH_NONINTERACTIVE_TIMEOUT_SECONDS,
+            )
+            stderr = probe.stderr
+
+        effective_returncode = probe.returncode if probe is not None else step.returncode
+        exit_text = f"exit {effective_returncode}"
+        if effective_returncode == 124:
+            self._set_network_status("offline")
+            self._set_auth_status("unavailable")
+            self.statusBar().showMessage(
+                f"Remote status probe timed out ({exit_text}); Gitualizer remains available offline.",
+                12000,
+            )
+        elif step.returncode == 130:
+            self._set_network_status("unknown")
+            self._set_auth_status("required")
+            self.statusBar().showMessage(
+                f"Remote command canceled (exit {step.returncode}); authentication was not completed.",
+                12000,
+            )
+        elif _looks_like_auth_failure(stderr):
+            self._set_network_status("online")
+            self._set_auth_status("required")
+            self.statusBar().showMessage(
+                f"Remote authentication required ({exit_text}).",
+                12000,
+            )
+        else:
+            self._set_network_status("offline")
+            self._set_auth_status("unavailable")
+            detail = stderr.strip().splitlines()
+            reason = detail[-1] if detail else "the remote could not be reached"
+            self.statusBar().showMessage(
+                f"Remote unavailable ({exit_text}): {reason}. Gitualizer remains available offline.",
+                12000,
+            )
 
     def _handle_reference_drop(self, source: Reference, target: Reference) -> None:
         if self.state is None:
@@ -1580,6 +1701,22 @@ def _looks_like_auth_failure(stderr: str) -> bool:
     )
 
 
+def _is_remote_step(args: list[str]) -> bool:
+    return len(args) > 1 and args[0] == "git" and args[1] in REMOTE_AUTH_COMMANDS
+
+
+def _remote_name_from_step(args: list[str]) -> Optional[str]:
+    if len(args) < 3:
+        return None
+    command = args[1]
+    values = [arg for arg in args[2:] if not arg.startswith("-")]
+    if not values:
+        return None
+    if command in {"fetch", "pull", "push", "ls-remote", "clone"}:
+        return values[0]
+    return None
+
+
 APP_STYLE = """
 QMainWindow, QWidget {
     background: #f6f8fa;
@@ -1677,6 +1814,16 @@ QPushButton#authStatusButton[authState="required"] {
     background: #cf222e;
 }
 QPushButton#authStatusButton[authState="unavailable"] {
+    background: #9a6700;
+}
+QPushButton#networkStatusButton {
+    background: #6b7280;
+    padding: 3px 8px;
+}
+QPushButton#networkStatusButton[networkState="online"] {
+    background: #1a7f37;
+}
+QPushButton#networkStatusButton[networkState="offline"] {
     background: #9a6700;
 }
 QHeaderView::section {
