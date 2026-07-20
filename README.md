@@ -1,8 +1,10 @@
-# Gitualizer
-
 <img width="1366" height="732" alt="image" src="https://github.com/user-attachments/assets/297d7ef5-84ed-4392-87db-19c47575d30e" />
 
-Gitualizer is a desktop Git client built around drag and drop.
+<video src="https://github.com/user-attachments/assets/342c2e1e-f5ca-43d2-a033-1b3dd300c1ea"></video>
+The video shows main diverging from origin/main, where the push is blocked by a non-fast-forward error because the remote branch is ahead; it then resolves the divergence with a rebase and completes a successful git push without any merge conflicts. The entire demo is performed using intuitive drag-and-drop operations only.
+
+# Gitualizer
+**Gitualizer** is a desktop Git client built around drag and drop.
 
 Instead of starting with a Git command, you start with the graph:
 
